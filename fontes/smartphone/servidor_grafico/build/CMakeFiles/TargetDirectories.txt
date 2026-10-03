@@ -1,0 +1,3 @@
+/home/slackware/paulo/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico/build/CMakeFiles/servidor_grafico.dir
+/home/slackware/paulo/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico/build/CMakeFiles/edit_cache.dir
+/home/slackware/paulo/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico/build/CMakeFiles/rebuild_cache.dir

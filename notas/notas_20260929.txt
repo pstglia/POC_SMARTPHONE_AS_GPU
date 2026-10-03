@@ -1,0 +1,246 @@
+# Script compilação (usei o android-ndk-r26d)
+paulo@I310105F:~/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico$ cat compila.sh 
+mkdir build && cd build
+
+# Altere o caminho abaixo para a pasta exata onde você descompactou o seu Android NDK
+PATH_DO_NDK="$HOME/projetos/gpu_smartphone/tools/android-ndk-r26d"
+
+cmake .. \
+  -DCMAKE_TOOLCHAIN_FILE=$PATH_DO_NDK/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-29 \
+  -DCMAKE_BUILD_TYPE=Release
+
+make
+#================================
+# Compilei
+
+paulo@I310105F:~/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico$ ./compila.sh 
+-- The CXX compiler identification is Clang 17.0.2
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /home/paulo/projetos/gpu_smartphone/tools/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/paulo/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico/build
+[ 50%] Building CXX object CMakeFiles/servidor_grafico.dir/servidor_grafico.cpp.o
+[100%] Linking CXX executable servidor_grafico
+[100%] Built target servidor_grafico
+#================================
+# Bin gerado
+paulo@I310105F:~/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico$ file build/servidor_grafico 
+build/servidor_grafico: ELF 64-bit LSB pie executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /system/bin/linker64, BuildID[sha1]=01706fbdd1a87beaa00705f3fe18fe6700c78334, with debug_info, not stripped
+
+#================================
+# Transferido e executado
+
+130|sanders:/data/local/tmp # ./servidor_grafico                                                                                                                                                                                             
+[+] GPU Adreno Inicializada com Sucesso!
+[+] Versão do GL: OpenGL ES 3.2 V@415.0 (GIT@961b24f, Ib57168459a, 1582563833) (Date:02/24/20)
+[+] Renderizador: Adreno (TM) 506
+[*] Servidor escutando pacotes gráficos na porta 65432...
+[GPU] Processados 30 pacotes/frames com sucesso.
+[GPU] Processados 60 pacotes/frames com sucesso.
+[GPU] Processados 90 pacotes/frames com sucesso.
+[GPU] Processados 120 pacotes/frames com sucesso.
+[GPU] Processados 150 pacotes/frames com sucesso.
+[GPU] Processados 180 pacotes/frames com sucesso.
+[GPU] Processados 210 pacotes/frames com sucesso.
+[GPU] Processados 240 pacotes/frames com sucesso.
+[GPU] Processados 270 pacotes/frames com sucesso.
+[GPU] Processados 300 pacotes/frames com sucesso.
+[GPU] Processados 330 pacotes/frames com sucesso.
+[GPU] Processados 360 pacotes/frames com sucesso.
+[GPU] Processados 390 pacotes/frames com sucesso.
+[GPU] Processados 420 pacotes/frames com sucesso.
+[GPU] Processados 450 pacotes/frames com sucesso.
+[GPU] Processados 480 pacotes/frames com sucesso.
+[GPU] Processados 510 pacotes/frames com sucesso.
+[GPU] Processados 540 pacotes/frames com sucesso.
+[GPU] Processados 570 pacotes/frames com sucesso.
+[GPU] Processados 600 pacotes/frames com sucesso.
+[GPU] Processados 630 pacotes/frames com sucesso.
+[GPU] Processados 660 pacotes/frames com sucesso.
+[GPU] Processados 690 pacotes/frames com sucesso.
+[GPU] Processados 720 pacotes/frames com sucesso.
+[GPU] Processados 750 pacotes/frames com sucesso.
+[GPU] Processados 780 pacotes/frames com sucesso.
+[GPU] Processados 810 pacotes/frames com sucesso.
+[GPU] Processados 840 pacotes/frames com sucesso.
+[GPU] Processados 870 pacotes/frames com sucesso.
+[GPU] Processados 900 pacotes/frames com sucesso.
+[GPU] Processados 930 pacotes/frames com sucesso.
+[GPU] Processados 960 pacotes/frames com sucesso.
+[GPU] Processados 990 pacotes/frames com sucesso.
+[GPU] Processados 1020 pacotes/frames com sucesso.
+[GPU] Processados 1050 pacotes/frames com sucesso.
+
+
+
+# Frames enviados pelo PC
+paulo@I310105F:~/projetos/gpu_smartphone/scripts_teste/teste_conectividade$ python emissor.py 
+[*] Testando latência real (Ping-Pong) contra 192.168.228.184...
+[PC -> Frame 0] Latência Real Estimada (Ida): 9.24ms | Média: 9.24ms
+[PC -> Frame 30] Latência Real Estimada (Ida): 4.54ms | Média: 4.98ms
+[PC -> Frame 60] Latência Real Estimada (Ida): 5.53ms | Média: 5.10ms
+[PC -> Frame 90] Latência Real Estimada (Ida): 4.99ms | Média: 5.14ms
+[PC -> Frame 120] Latência Real Estimada (Ida): 3.96ms | Média: 4.86ms
+[PC -> Frame 150] Latência Real Estimada (Ida): 3.99ms | Média: 4.68ms
+[PC -> Frame 180] Latência Real Estimada (Ida): 3.07ms | Média: 4.54ms
+[PC -> Frame 210] Latência Real Estimada (Ida): 3.75ms | Média: 4.46ms
+[PC -> Frame 240] Latência Real Estimada (Ida): 4.02ms | Média: 4.40ms
+[PC -> Frame 270] Latência Real Estimada (Ida): 3.99ms | Média: 4.35ms
+[PC -> Frame 300] Latência Real Estimada (Ida): 4.17ms | Média: 4.31ms
+[PC -> Frame 330] Latência Real Estimada (Ida): 4.12ms | Média: 4.28ms
+[PC -> Frame 360] Latência Real Estimada (Ida): 3.96ms | Média: 4.24ms
+[PC -> Frame 390] Latência Real Estimada (Ida): 4.02ms | Média: 4.22ms
+[PC -> Frame 420] Latência Real Estimada (Ida): 3.93ms | Média: 4.20ms
+[PC -> Frame 450] Latência Real Estimada (Ida): 3.95ms | Média: 4.18ms
+[PC -> Frame 480] Latência Real Estimada (Ida): 3.87ms | Média: 4.16ms
+[PC -> Frame 510] Latência Real Estimada (Ida): 3.98ms | Média: 4.14ms
+[PC -> Frame 540] Latência Real Estimada (Ida): 4.00ms | Média: 4.13ms
+[PC -> Frame 570] Latência Real Estimada (Ida): 3.99ms | Média: 4.12ms
+[PC -> Frame 600] Latência Real Estimada (Ida): 4.00ms | Média: 4.11ms
+[PC -> Frame 630] Latência Real Estimada (Ida): 4.13ms | Média: 4.11ms
+[PC -> Frame 660] Latência Real Estimada (Ida): 4.07ms | Média: 4.10ms
+[PC -> Frame 690] Latência Real Estimada (Ida): 5.30ms | Média: 4.09ms
+[PC -> Frame 720] Latência Real Estimada (Ida): 4.14ms | Média: 4.08ms
+[PC -> Frame 750] Latência Real Estimada (Ida): 4.09ms | Média: 4.08ms
+[PC -> Frame 780] Latência Real Estimada (Ida): 4.09ms | Média: 4.07ms
+[PC -> Frame 810] Latência Real Estimada (Ida): 4.00ms | Média: 4.06ms
+[PC -> Frame 840] Latência Real Estimada (Ida): 3.95ms | Média: 4.06ms
+[PC -> Frame 870] Latência Real Estimada (Ida): 4.29ms | Média: 4.05ms
+[PC -> Frame 900] Latência Real Estimada (Ida): 4.07ms | Média: 4.05ms
+[PC -> Frame 930] Latência Real Estimada (Ida): 3.91ms | Média: 4.04ms
+[PC -> Frame 960] Latência Real Estimada (Ida): 3.98ms | Média: 4.04ms
+[PC -> Frame 990] Latência Real Estimada (Ida): 4.06ms | Média: 4.03ms
+[PC -> Frame 1020] Latência Real Estimada (Ida): 3.97ms | Média: 4.03ms
+[PC -> Frame 1050] Latência Real Estimada (Ida): 4.02ms | Média: 4.03ms
+
+
+
+
+
+
+
+#================================
+#================================
+#================================
+
+21:37
+# Alterei e Recompilei o servidor_grafico (fiz uma pequena alteração no script para garantir que ele entre no diretório build)
+paulo@I310105F:/home/slackware/paulo/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico$ cat ./compila.sh
+mkdir build ; cd build
+
+# Altere o caminho abaixo para a pasta exata onde você descompactou o seu Android NDK
+PATH_DO_NDK="$HOME/projetos/gpu_smartphone/tools/android-ndk-r26d"
+
+cmake .. \
+  -DCMAKE_TOOLCHAIN_FILE=$PATH_DO_NDK/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-29 \
+  -DCMAKE_BUILD_TYPE=Release
+
+make
+
+
+
+paulo@I310105F:/home/slackware/paulo/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico$ ./compila.sh 
+mkdir: não foi possível criar o diretório “build”: Arquivo existe
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/slackware/paulo/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico/build
+[ 50%] Building CXX object CMakeFiles/servidor_grafico.dir/servidor_grafico.cpp.o
+[100%] Linking CXX executable servidor_grafico
+[100%] Built target servidor_grafico
+
+
+paulo@I310105F:/home/slackware/paulo/projetos/gpu_smartphone/fontes/smartphone/servidor_grafico$ adb push build/servidor_grafico /data/local/tmp/
+build/servidor_grafico: 1 file pushed, 0 skipped. 206.9 MB/s (774256 bytes in 0.004s)
+
+#================================
+# Enviei os frames pelo novo python - resultados
+
+130|sanders:/data/local/tmp # ./servidor_grafico                                                                                                                                                                                             
+[+] GPU Adreno 506 Pronta. Buffer de VRAM Alocado!
+[*] Aguardando geometria procedural na porta 65432...
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+[GPU] Upload efetuado com sucesso para 12000 bytes de vértices.
+
+
+paulo@I310105F:~/projetos/gpu_smartphone/scripts_teste/teste_conectividade$ python emissor_grafico.py 
+[*] Enviando geometria dinâmica (500 vértices) a 30 FPS...
+[Frame 0] 11.72 KB de Geometria | Latência: 7.65ms
+[Frame 30] 11.72 KB de Geometria | Latência: 3.01ms
+[Frame 60] 11.72 KB de Geometria | Latência: 3.20ms
+[Frame 90] 11.72 KB de Geometria | Latência: 3.17ms
+[Frame 120] 11.72 KB de Geometria | Latência: 3.09ms
+[Frame 150] 11.72 KB de Geometria | Latência: 3.40ms
+[Frame 180] 11.72 KB de Geometria | Latência: 2.87ms
+[Frame 210] 11.72 KB de Geometria | Latência: 3.30ms
+[Frame 240] 11.72 KB de Geometria | Latência: 3.01ms
+[Frame 270] 11.72 KB de Geometria | Latência: 3.77ms
+[Frame 300] 11.72 KB de Geometria | Latência: 3.06ms
+[Frame 330] 11.72 KB de Geometria | Latência: 3.03ms
+[Frame 360] 11.72 KB de Geometria | Latência: 3.11ms
+[Frame 390] 11.72 KB de Geometria | Latência: 3.23ms
+[Frame 420] 11.72 KB de Geometria | Latência: 3.08ms
+[Frame 450] 11.72 KB de Geometria | Latência: 2.95ms
+[Frame 480] 11.72 KB de Geometria | Latência: 3.21ms
+[Frame 510] 11.72 KB de Geometria | Latência: 2.84ms
+[Frame 540] 11.72 KB de Geometria | Latência: 3.21ms
+[Frame 570] 11.72 KB de Geometria | Latência: 3.06ms
+[Frame 600] 11.72 KB de Geometria | Latência: 3.16ms
+[Frame 630] 11.72 KB de Geometria | Latência: 3.36ms
+[Frame 660] 11.72 KB de Geometria | Latência: 3.02ms
+[Frame 690] 11.72 KB de Geometria | Latência: 2.96ms
+[Frame 720] 11.72 KB de Geometria | Latência: 3.13ms
+[Frame 750] 11.72 KB de Geometria | Latência: 2.87ms
+[Frame 780] 11.72 KB de Geometria | Latência: 2.94ms
+[Frame 810] 11.72 KB de Geometria | Latência: 2.98ms
+[Frame 840] 11.72 KB de Geometria | Latência: 2.99ms
+[Frame 870] 11.72 KB de Geometria | Latência: 3.26ms
+[Frame 900] 11.72 KB de Geometria | Latência: 2.93ms
+[Frame 930] 11.72 KB de Geometria | Latência: 3.31ms
+[Frame 960] 11.72 KB de Geometria | Latência: 3.16ms
+[Frame 990] 11.72 KB de Geometria | Latência: 2.93ms
+[Frame 1020] 11.72 KB de Geometria | Latência: 2.08ms
+[Frame 1050] 11.72 KB de Geometria | Latência: 3.07ms
+
+
+
