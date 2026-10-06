@@ -3,7 +3,7 @@ import time
 import struct
 import math
 
-TARGET_IP = '192.168.228.184' # Mantenha o IP atual do seu RNDIS
+TARGET_IP = '192.168.87.42' # Mantenha o IP atual do seu RNDIS
 TARGET_PORT = 65432
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
