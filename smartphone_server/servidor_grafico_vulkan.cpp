@@ -248,82 +248,102 @@ int main() {
     ContextoVulkanHeadless vk;
     if (!inicializarVulkanHeadless(vk)) return -1;
 
-    if (!inicializarFilaComandosHeadless(vk)) return -1;
+    // --- 1. CONFIGURAÇÃO DO SERVIDOR TCP DE INICIALIZAÇÃO (Porta 65431) ---
+    int tcp_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int opt_tcp = 1;
+    setsockopt(tcp_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt_tcp, sizeof(opt_tcp));
 
-    int sockfd; 
-    struct sockaddr_in servaddr, cliaddr;
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in tcp_serv_addr, tcp_cli_addr;
+    std::memset(&tcp_serv_addr, 0, sizeof(tcp_serv_addr));
+    tcp_serv_addr.sin_family = AF_INET;
+    tcp_serv_addr.sin_addr.s_addr = INADDR_ANY;
+    tcp_serv_addr.sin_port = htons(65431);
 
-    // EXPANSÃO MESTRE DE BUFFER DO KERNEL DO ANDROID (4 Megabytes de cache de rede)
-    int optval_rcv = 4 * 1024 * 1024;
-    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &optval_rcv, sizeof(optval_rcv)) < 0) {
-        std::cerr << "[-] Erro ao expandir SO_RCVBUF no Android." << std::endl;
+    bind(tcp_listen_fd, (struct sockaddr*)&tcp_serv_addr, sizeof(tcp_serv_addr));
+    listen(tcp_listen_fd, 1);
+    std::cout << "[*] Servidor TCP de Inicializacao Ativo na porta 65431..." << std::endl;
+
+    socklen_t tcp_len = sizeof(tcp_cli_addr);
+    int tcp_client_fd = accept(tcp_listen_fd, (struct sockaddr*)&tcp_cli_addr, &tcp_len);
+    
+    if (tcp_client_fd >= 0) {
+        std::cout << "[+] Canal TCP Conectado! Aguardando Shaders dinâmicos do PC..." << std::endl;
+        
+        while (true) {
+            uint32_t tag_comando = 0;
+            ssize_t r_tag = recv(tcp_client_fd, &tag_comando, 4, MSG_WAITALL);
+            if (r_tag <= 0) break; // Conexão fechada ao fim do setup inicial
+
+            if (tag_comando == 0x53484452) { // Tag "[SHDR]"
+                uint32_t tamanho_shader = 0;
+                recv(tcp_client_fd, &tamanho_shader, 4, MSG_WAITALL);
+
+                std::vector<uint32_t> spirv_buffer(tamanho_shader / 4);
+                recv(tcp_client_fd, spirv_buffer.data(), tamanho_shader, MSG_WAITALL);
+
+                // COMPILAÇÃO DINÂMICA DIRETO NO SILÍCIO DA QUALCOMM!
+                VkShaderModuleCreateInfo shaderInfo{};
+                static PFN_vkCreateShaderModule real_vkCreateShaderModule = (PFN_vkCreateShaderModule)dlsym(vulkan_lib, "vkCreateShaderModule");
+                shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+                shaderInfo.codeSize = tamanho_shader;
+                shaderInfo.pCode = spirv_buffer.data();
+
+                VkShaderModule modulo_temporario;
+                if (real_vkCreateShaderModule(vk.device, &shaderInfo, nullptr, &modulo_temporario) == VK_SUCCESS) {
+                    std::cout << "[Vulkan GPU] SUCESSO: Shader de " << tamanho_shader << " bytes compilado na Adreno 619!" << std::endl;
+                    uint32_t status_ok = 0x4B4F2B5B; // "[+OK]"
+                    send(tcp_client_fd, &status_ok, 4, 0);
+                }
+            }
+        }
+        close(tcp_client_fd);
     }
+    close(tcp_listen_fd);
 
+    // --- 2. CONFIGURAÇÃO DO STREAMING UDP GEOMÉTRICO (Porta 65432) ---
+    int sockfd; struct sockaddr_in servaddr, cliaddr;
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    int optval_rcv = 4 * 1024 * 1024;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &optval_rcv, sizeof(optval_rcv));
     std::memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = INADDR_ANY;
     servaddr.sin_port = htons(PORT);
+    bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr));
 
-    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
-        std::cerr << "[-] Erro ao dar bind no socket." << std::endl;
-        return -1;
-    }
-
-    std::cout << "[*] Aguardando buffers geometricos sincronos na porta " << PORT << "..." << std::endl;
+    if (!inicializarFilaComandosHeadless(vk)) return -1;
+    std::cout << "[*] Canal UDP pronto para receber VBOs na porta " << PORT << "..." << std::endl;
 
     std::vector<char> socket_read_buffer(MAX_BUFFER_SIZE);
     std::vector<char> frame_geometry_accumulator;
     socklen_t len = sizeof(cliaddr);
 
-    int flags = fcntl(sockfd, F_GETFL, 0);
-    fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
-
     while (true) {
         frame_geometry_accumulator.clear();
-        size_t bytes_recebidos_vbo = 0;
-        uint32_t tamanho_esperado = 0;
-        uint32_t current_frame_id = 0;
-        bool frame_concluido = false;
-
+        size_t bytes_recebidos_vbo = 0; uint32_t tamanho_esperado = 0; uint32_t current_frame_id = 0; bool frame_concluido = false;
         while (true) {
             ssize_t n = recvfrom(sockfd, socket_read_buffer.data(), MAX_BUFFER_SIZE, 0, (struct sockaddr *)&cliaddr, &len);
             if (n <= 0) continue;
-
             if (n >= 12) {
                 std::memcpy(&tamanho_esperado, socket_read_buffer.data(), 4);
                 std::memcpy(&current_frame_id, socket_read_buffer.data() + 4, 4);
-                uint32_t chunk_id;
-                std::memcpy(&chunk_id, socket_read_buffer.data() + 8, 4);
-
+                uint32_t chunk_id; std::memcpy(&chunk_id, socket_read_buffer.data() + 8, 4);
                 size_t tamanho_payload = n - 12;
                 frame_geometry_accumulator.insert(frame_geometry_accumulator.end(), socket_read_buffer.begin() + 12, socket_read_buffer.begin() + n);
                 bytes_recebidos_vbo += tamanho_payload;
-
-                if (bytes_recebidos_vbo >= tamanho_esperado) {
-                    frame_concluido = true;
-                    break;
-                }
+                if (bytes_recebidos_vbo >= tamanho_esperado) { frame_concluido = true; break; }
             }
         }
-
         if (frame_concluido && bytes_recebidos_vbo == tamanho_esperado) {
             if (alocarVertexBufferDinamico(vk, bytes_recebidos_vbo)) {
                 void* ptrVRAM = nullptr;
-                VkResult map_res = real_vkMapMemory(vk.device, vk.vertexBufferMemory, 0, bytes_recebidos_vbo, 0, &ptrVRAM);
-
-                if (map_res == VK_SUCCESS && ptrVRAM) {
+                if (real_vkMapMemory(vk.device, vk.vertexBufferMemory, 0, bytes_recebidos_vbo, 0, &ptrVRAM) == VK_SUCCESS && ptrVRAM) {
                     std::memcpy(ptrVRAM, frame_geometry_accumulator.data(), bytes_recebidos_vbo);
                     real_vkUnmapMemory(vk.device, vk.vertexBufferMemory);
-                    std::cout << "[Vulkan GPU] Frame ID: " << current_frame_id << " | Gravado na VRAM: " << bytes_recebidos_vbo << " bytes." << std::endl;
                 }
             }
-
             sendto(sockfd, &current_frame_id, sizeof(current_frame_id), 0, (const struct sockaddr *)&cliaddr, len);
         }
     }
-
-    close(sockfd);
-    limparVulkan(vk);
-    return 0;
+    close(sockfd); limparVulkan(vk); return 0;
 }

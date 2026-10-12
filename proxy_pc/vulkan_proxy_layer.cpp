@@ -20,12 +20,20 @@ static PFN_vkDestroyDevice   nextDestroyDevice = nullptr;
 static PFN_vkCmdDraw         nextCmdDraw = nullptr;
 static PFN_vkQueuePresentKHR nextQueuePresentKHR = nullptr;
 
+// Tabela de despacho para o encaminhamento do Shader Module
+static PFN_vkCreateShaderModule nextCreateShaderModule = nullptr;
+static PFN_vkDestroyShaderModule nextDestroyShaderModule = nullptr;
+
 static VkInstance currentInstance = VK_NULL_HANDLE;
 static VkDevice   currentDevice = VK_NULL_HANDLE;
 
 static int sockfd = -1;
 static struct sockaddr_in servaddr;
 static bool rede_inicializada = false;
+
+// --- CANAL DE INICIALIZAÇÃO E COMANDOS PESADOS TCP ---
+static int tcp_client_fd = -1;
+static bool tcp_inicializado = false;
 
 static char buffer_envio_global[64 * 1024];
 static std::vector<char> cache_geometria_local;
@@ -62,15 +70,35 @@ void inicializarRedeProxyComThread() {
 
 void inicializarRedeProxy() {
     if (rede_inicializada) return;
+    
+    // 1. CONEXÃO MESTRE TCP (Porta 65431)
+    tcp_client_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in tcp_servaddr;
+    std::memset(&tcp_servaddr, 0, sizeof(tcp_servaddr));
+    tcp_servaddr.sin_family = AF_INET;
+    tcp_servaddr.sin_port = htons(65431);
+    
+    const char* ip_env = std::getenv("SMARTPHONE_IP");
+    const char* ip_final = (ip_env != nullptr) ? ip_env : "10.170.47.49";
+    tcp_servaddr.sin_addr.s_addr = inet_addr(ip_final);
+
+    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Conectando ao canal TCP de controle: %s...\n", ip_final);
+    if (connect(tcp_client_fd, (struct sockaddr*)&tcp_servaddr, sizeof(tcp_servaddr)) >= 0) {
+        tcp_inicializado = true;
+        std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Canal TCP de controle ativado com Sucesso!\n");
+    } else {
+        std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Erro: Celular nao respondeu no canal TCP.\n");
+    }
+
+    // 2. CONEXÃO DE STREAMING UDP (Porta 65432)
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     std::memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_port = htons(65432); 
-    const char* ip_env = std::getenv("SMARTPHONE_IP");
-    const char* ip_final = (ip_env != nullptr) ? ip_env : "10.170.47.49";
     servaddr.sin_addr.s_addr = inet_addr(ip_final);
+    
     rede_inicializada = true;
-    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Tunel eletrico ativado para o IP: %s\n", ip_final);
+    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Tunel UDP de Geometria ativado para o IP: %s\n", ip_final);
 }
 
 static VkLayerInstanceCreateInfo* getInstanceChainInfo(const VkInstanceCreateInfo* pCreateInfo, VkLayerFunction function) {
@@ -108,8 +136,10 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice device, VkDeviceMem
         std::memcpy(cache_geometria_local.data(), ponteiro_mapeado_atual, tamanho_mapeado_atual);
         tem_geometria_pronta = true;
         std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Geometria do Cubo capturada com sucesso no Unmap! (%lu bytes)\n", (unsigned long)tamanho_mapeado_atual);
-        ponteiro_mapeado_atual = nullptr;
-        tamanho_mapeado_atual = 0;
+        
+        // --- APAGUE OU COMENTE ESTAS DUAS LINHAS ABAIXO: ---
+        // ponteiro_mapeado_atual = nullptr;
+        // tamanho_mapeado_atual = 0;
     }
     nextUnmap(device, memory);
 }
@@ -118,13 +148,12 @@ static VKAPI_ATTR void VKAPI_CALL MyHook_vkCmdDraw(VkCommandBuffer commandBuffer
     if (nextCmdDraw) nextCmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
+// --- GANCHO PRESENT (Mantido Estável com o Sliding Window Atômico) ---
 static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
     VkQueue queue,
     const VkPresentInfoKHR* pPresentInfo)
 {
     static uint32_t global_frame_id = 0;
-    
-    // --- VARIÁVEIS DO CÁLCULO DE FPS REAL ---
     static uint32_t fps_counter = 0;
     static auto tempo_anterior = std::chrono::high_resolution_clock::now();
     
@@ -132,10 +161,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
     auto tempo_atual = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> tempo_decorrido = tempo_atual - tempo_anterior;
 
-    // A cada 1000 milissegundos (1 segundo), calcula e cospe a métrica real no console do PC
     if (tempo_decorrido.count() >= 1000.0) {
         double fps_real = (fps_counter * 1000.0) / tempo_decorrido.count();
-        std::fprintf(stderr, "\n[METRICA GPU EXTERNA] FPS Real no PC: %.2f | Ultimo Frame ID Despachado: %u\n\n", fps_real, global_frame_id);
+        std::fprintf(stderr, "\n[METRICA GPU EXTERNA] FPS Real no PC Real: %.2f | Frame ID: %u\n\n", fps_real, global_frame_id);
         fps_counter = 0;
         tempo_anterior = tempo_atual;
     }
@@ -144,7 +172,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
     while ((current_frame - frame_confirmado_id.load()) >= MAX_FRAMES_IN_FLIGHT) {
         usleep(500); 
     }
-    
+
+    // CORREÇÃO: Alinhamento de concorrência. Se o cache na RAM do PC possui dados, envia sempre!
     if (rede_inicializada && !cache_geometria_local.empty()) {
         const size_t MAX_PAYLOAD_SIZE = 1400; 
         size_t bytes_despachados = 0;
@@ -152,14 +181,18 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
         char* ponteiro_dados = cache_geometria_local.data();
         uint32_t chunk_id = 0;
         uint32_t tamanho_total = (uint32_t)tamanho_total_vbo;
+
         while (bytes_despachados < tamanho_total_vbo) {
             size_t tamanho_bloco = std::min(MAX_PAYLOAD_SIZE, tamanho_total_vbo - bytes_despachados);
+            
             std::vector<char> pacote_envio(12 + tamanho_bloco);
             std::memcpy(pacote_envio.data(), &tamanho_total, 4);
             std::memcpy(pacote_envio.data() + 4, &current_frame, 4); 
             std::memcpy(pacote_envio.data() + 8, &chunk_id, 4);
             std::memcpy(pacote_envio.data() + 12, ponteiro_dados + bytes_despachados, tamanho_bloco);
+
             sendto(sockfd, pacote_envio.data(), pacote_envio.size(), 0, (const struct sockaddr *)&servaddr, sizeof(servaddr));
+            
             bytes_despachados += tamanho_bloco;
             chunk_id++;
             usleep(5);
@@ -167,7 +200,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
         frame_enviado_id.fetch_add(1);
         global_frame_id++;
     }
-    if (nextQueuePresentKHR) return nextQueuePresentKHR(queue, pPresentInfo);
+
+    if (nextQueuePresentKHR) {
+        return nextQueuePresentKHR(queue, pPresentInfo);
+    }
     return VK_SUCCESS;
 }
 
@@ -247,6 +283,7 @@ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice
     if (std::strcmp(pName, "vkUnmapMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkUnmapMemory);
     if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(MyHook_vkCmdDraw);
     if (std::strcmp(pName, "vkQueuePresentKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(MyHook_vkQueuePresentKHR);
+    if (std::strcmp(pName, "vkCreateShaderModule") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkCreateShaderModule);
     if (nextGDPA) return nextGDPA(device, pName);
     return nullptr;
 }
@@ -258,4 +295,52 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion
     pVersionStruct->pfnGetDeviceProcAddr = vkGetDeviceProcAddr;
     pVersionStruct->pfnGetPhysicalDeviceProcAddr = nullptr;
     return VK_SUCCESS;
+}
+
+// --- GANCHO DE SHADERS CORRIGIDO COM FECHAMENTO DE CONEXÃO CONTROLOGADA ---
+extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
+    VkDevice device,
+    const VkShaderModuleCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkShaderModule* pShaderModule)
+{
+    if (nextCreateShaderModule == nullptr) {
+        nextCreateShaderModule = reinterpret_cast<PFN_vkCreateShaderModule>(nextGDPA(device, "vkCreateShaderModule"));
+    }
+
+    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] vkCreateShaderModule: %lu bytes\n", pCreateInfo->codeSize);
+
+    // Rastreia estaticamente quantos shaders o vkcube já compilou (são 2 no total)
+    static int shaders_compilados_count = 0;
+
+    if (tcp_inicializado && pCreateInfo->codeSize > 0) {
+        uint32_t tipo_comando = 0x53484452; // Tag "[SHDR]"
+        uint32_t tamanho_shader = (uint32_t)pCreateInfo->codeSize;
+
+        send(tcp_client_fd, &tipo_comando, 4, 0);
+        send(tcp_client_fd, &tamanho_shader, 4, 0);
+        send(tcp_client_fd, pCreateInfo->pCode, pCreateInfo->codeSize, 0);
+
+        uint32_t status_compilacao = 0;
+        recv(tcp_client_fd, &status_compilacao, 4, MSG_WAITALL);
+        
+        if (status_compilacao == 0x4B4F2B5B) { // "[+OK]"
+            shaders_compilados_count++;
+        }
+
+        // XEQUE-MATE DO SINCRONISMO: Se compilou os dois shaders obrigatórios, desliga o TCP limpo!
+        if (shaders_compilados_count >= 2) {
+            std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Todos os Shaders enviados. Fechando canal TCP mestre...\n");
+            
+            uint32_t comando_exit = 0x45584954; // Tag "[EXIT]" (4 bytes)
+            send(tcp_client_fd, &comando_exit, 4, 0);
+            
+            // Fecha o socket fisicamente no PC real e desativa a flag de controle
+            close(tcp_client_fd);
+            tcp_client_fd = -1;
+            tcp_inicializado = false;
+        }
+    }
+
+    return nextCreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);
 }
