@@ -11,6 +11,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <chrono>
 
 static PFN_vkGetInstanceProcAddr nextGIPA = nullptr;
 static PFN_vkGetDeviceProcAddr   nextGDPA = nullptr;
@@ -117,11 +118,33 @@ static VKAPI_ATTR void VKAPI_CALL MyHook_vkCmdDraw(VkCommandBuffer commandBuffer
     if (nextCmdDraw) nextCmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) {
+static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
+    VkQueue queue,
+    const VkPresentInfoKHR* pPresentInfo)
+{
+    static uint32_t global_frame_id = 0;
+    
+    // --- VARIÁVEIS DO CÁLCULO DE FPS REAL ---
+    static uint32_t fps_counter = 0;
+    static auto tempo_anterior = std::chrono::high_resolution_clock::now();
+    
+    fps_counter++;
+    auto tempo_atual = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> tempo_decorrido = tempo_atual - tempo_anterior;
+
+    // A cada 1000 milissegundos (1 segundo), calcula e cospe a métrica real no console do PC
+    if (tempo_decorrido.count() >= 1000.0) {
+        double fps_real = (fps_counter * 1000.0) / tempo_decorrido.count();
+        std::fprintf(stderr, "\n[METRICA GPU EXTERNA] FPS Real no PC: %.2f | Ultimo Frame ID Despachado: %u\n\n", fps_real, global_frame_id);
+        fps_counter = 0;
+        tempo_anterior = tempo_atual;
+    }
+
     uint32_t current_frame = frame_enviado_id.load();
     while ((current_frame - frame_confirmado_id.load()) >= MAX_FRAMES_IN_FLIGHT) {
         usleep(500); 
     }
+    
     if (rede_inicializada && !cache_geometria_local.empty()) {
         const size_t MAX_PAYLOAD_SIZE = 1400; 
         size_t bytes_despachados = 0;
@@ -142,6 +165,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(VkQueue queue, co
             usleep(5);
         }
         frame_enviado_id.fetch_add(1);
+        global_frame_id++;
     }
     if (nextQueuePresentKHR) return nextQueuePresentKHR(queue, pPresentInfo);
     return VK_SUCCESS;
