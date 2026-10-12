@@ -35,6 +35,12 @@ typedef VkResult (*PFN_vkMapMemory)(VkDevice, VkDeviceMemory, VkDeviceSize, VkDe
 typedef void (*PFN_vkUnmapMemory)(VkDevice, VkDeviceMemory);
 typedef void (*PFN_vkDestroyBuffer)(VkDevice, VkBuffer, const VkAllocationCallbacks*);
 
+typedef VkResult (*PFN_vkCreateCommandPool)(VkDevice, const VkCommandPoolCreateInfo*, const VkAllocationCallbacks*, VkCommandPool*);
+typedef VkResult (*PFN_vkAllocateCommandBuffers)(VkDevice, const VkCommandBufferAllocateInfo*, VkCommandBuffer*);
+typedef VkResult (*PFN_vkBeginCommandBuffer)(VkCommandBuffer, const VkCommandBufferBeginInfo*);
+typedef VkResult (*PFN_vkEndCommandBuffer)(VkCommandBuffer);
+typedef void (*PFN_vkDestroyCommandPool)(VkDevice, VkCommandPool, const VkAllocationCallbacks*);
+
 static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
 static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices = nullptr;
 static PFN_vkGetPhysicalDeviceProperties real_vkGetPhysicalDeviceProperties = nullptr;
@@ -55,6 +61,13 @@ static PFN_vkBindBufferMemory real_vkBindBufferMemory = nullptr;
 static PFN_vkMapMemory real_vkMapMemory = nullptr;
 static PFN_vkUnmapMemory real_vkUnmapMemory = nullptr;
 static PFN_vkDestroyBuffer real_vkDestroyBuffer = nullptr;
+
+static PFN_vkCreateCommandPool real_vkCreateCommandPool = nullptr;
+static PFN_vkAllocateCommandBuffers real_vkAllocateCommandBuffers = nullptr;
+static PFN_vkBeginCommandBuffer real_vkBeginCommandBuffer = nullptr;
+static PFN_vkEndCommandBuffer real_vkEndCommandBuffer = nullptr;
+static PFN_vkDestroyCommandPool real_vkDestroyCommandPool = nullptr;
+
 
 void* vulkan_lib = nullptr;
 
@@ -81,6 +94,12 @@ bool carregarFuncoesVulkan() {
     real_vkMapMemory = (PFN_vkMapMemory)dlsym(vulkan_lib, "vkMapMemory");
     real_vkUnmapMemory = (PFN_vkUnmapMemory)dlsym(vulkan_lib, "vkUnmapMemory");
     real_vkDestroyBuffer = (PFN_vkDestroyBuffer)dlsym(vulkan_lib, "vkDestroyBuffer");
+    real_vkCreateCommandPool = (PFN_vkCreateCommandPool)dlsym(vulkan_lib, "vkCreateCommandPool");
+    real_vkAllocateCommandBuffers = (PFN_vkAllocateCommandBuffers)dlsym(vulkan_lib, "vkAllocateCommandBuffers");
+    real_vkBeginCommandBuffer = (PFN_vkBeginCommandBuffer)dlsym(vulkan_lib, "vkBeginCommandBuffer");
+    real_vkEndCommandBuffer = (PFN_vkEndCommandBuffer)dlsym(vulkan_lib, "vkEndCommandBuffer");
+    real_vkDestroyCommandPool = (PFN_vkDestroyCommandPool)dlsym(vulkan_lib, "vkDestroyCommandPool");
+
     return true;
 }
 
@@ -94,6 +113,8 @@ struct ContextoVulkanHeadless {
     VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
     VkDeviceSize tamanhoBufferAlocado = 0;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 };
 
 uint32_t encontrarTipoMemoria(VkPhysicalDevice physicalDevice, uint32_t tipoFiltro, VkMemoryPropertyFlags propriedades) {
@@ -185,6 +206,8 @@ bool inicializarVulkanHeadless(ContextoVulkanHeadless& vk) {
 }
 
 void limparVulkan(ContextoVulkanHeadless& vk) {
+    if (vk.commandPool != VK_NULL_HANDLE) real_vkDestroyCommandPool(vk.device, vk.commandPool, nullptr);
+
     if (vk.vertexBuffer != VK_NULL_HANDLE) real_vkDestroyBuffer(vk.device, vk.vertexBuffer, nullptr);
     if (vk.vertexBufferMemory != VK_NULL_HANDLE) real_vkFreeMemory(vk.device, vk.vertexBufferMemory, nullptr);
     if (vk.headlessImage != VK_NULL_HANDLE) real_vkDestroyImage(vk.device, vk.headlessImage, nullptr);
@@ -194,9 +217,38 @@ void limparVulkan(ContextoVulkanHeadless& vk) {
     if (vulkan_lib) dlclose(vulkan_lib);
 }
 
+// --- FUNÇÃO DE CRIAÇÃO DA FILA DE COMANDOS HEADLESS ---
+bool inicializarFilaComandosHeadless(ContextoVulkanHeadless& vk) {
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = 0; // Fila grafica padrao carregada no main
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; // Permite re-gravar a cada frame
+
+    if (real_vkCreateCommandPool(vk.device, &poolInfo, nullptr, &vk.commandPool) != VK_SUCCESS) {
+        std::cerr << "[-] Falha ao alocar VkCommandPool na Adreno." << std::endl;
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = vk.commandPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    if (real_vkAllocateCommandBuffers(vk.device, &allocInfo, &vk.commandBuffer) != VK_SUCCESS) {
+        std::cerr << "[-] Falha ao instanciar VkCommandBuffer Headless." << std::endl;
+        return false;
+    }
+
+    std::cout << "[+] Factory de Comandos e VkCommandBuffer instanciados na GPU do smartphone!" << std::endl;
+    return true;
+}
+
 int main() {
     ContextoVulkanHeadless vk;
     if (!inicializarVulkanHeadless(vk)) return -1;
+
+    if (!inicializarFilaComandosHeadless(vk)) return -1;
 
     int sockfd; 
     struct sockaddr_in servaddr, cliaddr;
