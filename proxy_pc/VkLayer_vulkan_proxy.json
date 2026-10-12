@@ -4,7 +4,7 @@
     "layer": {
         "name": "VK_LAYER_USB_SMARTPHONE_PROXY",
         "type": "GLOBAL",
-        "library_path": "/home/paulo/projetos/vulkan_proxy/libvulkan_proxy_layer.so",
+        "library_path": "/home/paulo/projetos/vulkan_proxy/proxy_pc/libvulkan_proxy_layer.so",
         "api_version": "1.3.0",
         "implementation_version": "1",
         "description": "Camada experimental de interceptacao Vulkan"
