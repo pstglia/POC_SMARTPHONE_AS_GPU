@@ -203,33 +203,58 @@ int main() {
         return -1;
     }
 
-    std::cout << "[*] Aguardando buffers geometricos do Vulkan Layer na porta " << PORT << "..." << std::endl;
+    std::cout << "[*] Aguardando buffers geometricos sincronos na porta " << PORT << "..." << std::endl;
 
     std::vector<char> socket_read_buffer(MAX_BUFFER_SIZE);
-
     std::vector<char> frame_geometry_accumulator;
     socklen_t len = sizeof(cliaddr);
+
+    // MANTÉM O CELULAR EM MODO BLOQUEANTE RÍGIDO
     int flags = fcntl(sockfd, F_GETFL, 0);
-    fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+    fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
+
     while (true) {
-    frame_geometry_accumulator.clear();
-    bool recebeu_dados = false;
-    while (true) {
-    ssize_t n = recvfrom(sockfd, socket_read_buffer.data(), MAX_BUFFER_SIZE, 0, (struct sockaddr *)&cliaddr, &len);
-    if (n > 0) {
-    recebeu_dados = true;
-    frame_geometry_accumulator.insert(frame_geometry_accumulator.end(), socket_read_buffer.begin(), socket_read_buffer.begin() + n);
-    } else {
-    if (recebeu_dados) break;
-    usleep(1000);
+        frame_geometry_accumulator.clear();
+        size_t bytes_recebidos_vbo = 0;
+        uint32_t tamanho_esperado = 0;
+
+        while (true) {
+            ssize_t n = recvfrom(sockfd, socket_read_buffer.data(), MAX_BUFFER_SIZE, 0, (struct sockaddr *)&cliaddr, &len);
+            if (n <= 0) continue;
+
+            if (n >= 8) {
+                // Extrai os metadados do cabeçalho de 8 bytes de forma segura
+                std::memcpy(&tamanho_esperado, socket_read_buffer.data(), 4);
+                uint32_t chunk_id;
+                std::memcpy(&chunk_id, socket_read_buffer.data() + 4, 4);
+
+                size_t tamanho_payload = n - 8;
+                
+                // Concatena apenas os dados úteis de geometria (pulando o cabeçalho)
+                frame_geometry_accumulator.insert(
+                    frame_geometry_accumulator.end(), 
+                    socket_read_buffer.begin() + 8, 
+                    socket_read_buffer.begin() + n
+                );
+                
+                bytes_recebidos_vbo += tamanho_payload;
+
+                // Se a soma dos payloads bater exatamente com o tamanho prometido, frame concluído!
+                if (bytes_recebidos_vbo >= tamanho_esperado) {
+                    break;
+                }
+            }
+        }
+
+        // CONTA FECHOU EM JUÍZO: Emite o log e responde o ACK para liberar a VM do PC imediatamente
+        if (bytes_recebidos_vbo > 0) {
+            std::cout << "[Vulkan GPU] Sincronizado: " << bytes_recebidos_vbo << " bytes de geometria na Adreno." << std::endl;
+            char ack_byte = 0x41; // 'A'
+            sendto(sockfd, &ack_byte, 1, 0, (struct sockaddr *)&cliaddr, len);
+        }
     }
-    }
-    size_t dados_totais = frame_geometry_accumulator.size();
-    if (dados_totais > 0) {
-    std::cout << "[Vulkan GPU] Remontados " << dados_totais << " bytes de VBO na Adreno 619." << std::endl;
-    }
-    }
+
     close(sockfd);
     limparVulkan(vk);
     return 0;
-    }
+}
