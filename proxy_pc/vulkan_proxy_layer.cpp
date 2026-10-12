@@ -9,6 +9,8 @@
 #include <cstdlib>
 #include <fcntl.h> 
 #include <vector>
+#include <thread>
+#include <atomic>
 
 static PFN_vkGetInstanceProcAddr nextGIPA = nullptr;
 static PFN_vkGetDeviceProcAddr   nextGDPA = nullptr;
@@ -30,6 +32,32 @@ static bool tem_geometria_pronta = false;
 
 static VkDeviceSize tamanho_mapeado_atual = 0;
 static void* ponteiro_mapeado_atual = nullptr;
+
+void inicializarRedeProxy();
+
+static std::atomic<uint32_t> frame_enviado_id(0);
+static std::atomic<uint32_t> frame_confirmado_id(0);
+static const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+
+void threadEscutaACK() {
+    uint32_t ack_frame_received = 0;
+    struct sockaddr_in de_addr;
+    socklen_t de_len = sizeof(de_addr);
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
+    while (rede_inicializada) {
+        ssize_t ack_res = recvfrom(sockfd, &ack_frame_received, sizeof(ack_frame_received), MSG_WAITALL, (struct sockaddr *)&de_addr, &de_len);
+        if (ack_res > 0) {
+            frame_confirmado_id.store(ack_frame_received);
+        }
+    }
+}
+
+void inicializarRedeProxyComThread() {
+    if (rede_inicializada) return;
+    inicializarRedeProxy();
+    std::thread(threadEscutaACK).detach();
+}
 
 void inicializarRedeProxy() {
     if (rede_inicializada) return;
@@ -85,26 +113,15 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice device, VkDeviceMem
     nextUnmap(device, memory);
 }
 
-// --- GANCHO DE DESENHO PURIFICADO (APENAS PASSA DIRETO) ---
-static VKAPI_ATTR void VKAPI_CALL MyHook_vkCmdDraw(
-    VkCommandBuffer commandBuffer,
-    uint32_t vertexCount,
-    uint32_t instanceCount,
-    uint32_t firstVertex,
-    uint32_t firstInstance)
-{
-    if (nextCmdDraw) {
-        nextCmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
-    }
+static VKAPI_ATTR void VKAPI_CALL MyHook_vkCmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) {
+    if (nextCmdDraw) nextCmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
-    VkQueue queue,
-    const VkPresentInfoKHR* pPresentInfo)
-{
-    static uint32_t global_frame_id = 0;
-    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Present Frame ID: %u | Despachando...\n", global_frame_id);
-
+static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) {
+    uint32_t current_frame = frame_enviado_id.load();
+    while ((current_frame - frame_confirmado_id.load()) >= MAX_FRAMES_IN_FLIGHT) {
+        usleep(500); 
+    }
     if (rede_inicializada && !cache_geometria_local.empty()) {
         const size_t MAX_PAYLOAD_SIZE = 1400; 
         size_t bytes_despachados = 0;
@@ -112,39 +129,21 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
         char* ponteiro_dados = cache_geometria_local.data();
         uint32_t chunk_id = 0;
         uint32_t tamanho_total = (uint32_t)tamanho_total_vbo;
-
         while (bytes_despachados < tamanho_total_vbo) {
             size_t tamanho_bloco = std::min(MAX_PAYLOAD_SIZE, tamanho_total_vbo - bytes_despachados);
-            
             std::vector<char> pacote_envio(12 + tamanho_bloco);
             std::memcpy(pacote_envio.data(), &tamanho_total, 4);
-            std::memcpy(pacote_envio.data() + 4, &global_frame_id, 4);
+            std::memcpy(pacote_envio.data() + 4, &current_frame, 4); 
             std::memcpy(pacote_envio.data() + 8, &chunk_id, 4);
             std::memcpy(pacote_envio.data() + 12, ponteiro_dados + bytes_despachados, tamanho_bloco);
-
             sendto(sockfd, pacote_envio.data(), pacote_envio.size(), 0, (const struct sockaddr *)&servaddr, sizeof(servaddr));
-            
             bytes_despachados += tamanho_bloco;
             chunk_id++;
-
-            // CADÊNCIA ELÉTRICA: 5 microssegundos de folga para o hardware de rede do Android respirar
             usleep(5);
         }
-
-        uint32_t ack_frame_received = 0xFFFFFFFF;
-        struct sockaddr_in de_addr;
-        socklen_t de_len = sizeof(de_addr);
-        
-        ssize_t ack_res = recvfrom(sockfd, &ack_frame_received, sizeof(ack_frame_received), MSG_WAITALL, (struct sockaddr *)&de_addr, &de_len);
-        
-        if (ack_res > 0 && ack_frame_received == global_frame_id) {
-            global_frame_id++;
-        }
+        frame_enviado_id.fetch_add(1);
     }
-
-    if (nextQueuePresentKHR) {
-        return nextQueuePresentKHR(queue, pPresentInfo);
-    }
+    if (nextQueuePresentKHR) return nextQueuePresentKHR(queue, pPresentInfo);
     return VK_SUCCESS;
 }
 
@@ -159,7 +158,7 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreat
     VkResult result = nextCreateInstance(pCreateInfo, pAllocator, pInstance);
     if (result == VK_SUCCESS) {
         currentInstance = *pInstance;
-        inicializarRedeProxy(); 
+        inicializarRedeProxyComThread(); 
         nextDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(nextGIPA(*pInstance, "vkDestroyInstance"));
     }
     return result;
@@ -191,7 +190,6 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physic
         nextDestroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(nextGDPA(*pDevice, "vkDestroyDevice"));
         nextCmdDraw = reinterpret_cast<PFN_vkCmdDraw>(nextGDPA(*pDevice, "vkCmdDraw"));
         nextQueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(nextGDPA(*pDevice, "vkQueuePresentKHR"));
-        std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] vkCreateDevice OK; Tunel Grafico e Apresentacao Prontos!\n");
     }
     return result;
 }
