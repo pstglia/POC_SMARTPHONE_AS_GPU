@@ -9,22 +9,22 @@
 #include <sys/socket.h>
 #include <cstdlib>
 
-// Símbolos de barramento dinâmico do Loader (Mantidos do ChatGPT)
 static PFN_vkGetInstanceProcAddr nextGIPA = nullptr;
 static PFN_vkGetDeviceProcAddr   nextGDPA = nullptr;
 static PFN_vkDestroyInstance nextDestroyInstance = nullptr;
 static PFN_vkDestroyDevice   nextDestroyDevice = nullptr;
 static PFN_vkCmdDraw         nextCmdDraw = nullptr;
 
+// Nova assinatura para interceptar o fim do frame
+static PFN_vkQueuePresentKHR nextQueuePresentKHR = nullptr;
+
 static VkInstance currentInstance = VK_NULL_HANDLE;
 static VkDevice   currentDevice = VK_NULL_HANDLE;
 
-// --- INFRAESTRUTURA DE REDE USB COM IP DINÂMICO ---
 static int sockfd = -1;
 static struct sockaddr_in servaddr;
 static bool rede_inicializada = false;
 
-// Cache local na RAM do PC para guardar as coordenadas tridimensionais que o jogo alocar
 static void* ponteiro_vertices_jogo = nullptr;
 static VkDeviceSize tamanho_buffer_vertices = 0;
 
@@ -34,20 +34,16 @@ void inicializarRedeProxy() {
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     std::memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
-    servaddr.sin_port = htons(65432); // Porta mestre do Moto G71
+    servaddr.sin_port = htons(65432); 
 
-    // CAPTURA AUTOMÁTICA DA VARIÁVEL DE AMBIENTE
     const char* ip_env = std::getenv("SMARTPHONE_IP");
     const char* ip_final = (ip_env != nullptr) ? ip_env : "10.170.47.49";
 
     servaddr.sin_addr.s_addr = inet_addr(ip_final);
     rede_inicializada = true;
-    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Tunel elétrico ativado direcionado para o IP: %s\n", ip_final);
+    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Tunel eletrico ativado para o IP: %s\n", ip_final);
 }
 
-// ------------------------------------------------------------------
-// BUSCADORES DE ENCADEAMENTO (Mantidos do ChatGPT)
-// ------------------------------------------------------------------
 static VkLayerInstanceCreateInfo* getInstanceChainInfo(const VkInstanceCreateInfo* pCreateInfo, VkLayerFunction function) {
     auto* item = reinterpret_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(pCreateInfo->pNext));
     while (item) {
@@ -66,9 +62,6 @@ static VkLayerDeviceCreateInfo* getDeviceChainInfo(const VkDeviceCreateInfo* pCr
     return nullptr;
 }
 
-// ------------------------------------------------------------------
-// HOOKS DE MAPEAMENTO DE MEMÓRIA DA GPU (O CORAÇÃO DO OFFLOADING)
-// ------------------------------------------------------------------
 extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(
     VkDevice device,
     VkDeviceMemory memory,
@@ -81,16 +74,12 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(
     VkResult res = nextMapMemory(device, memory, offset, size, flags, ppData);
     
     if (res == VK_SUCCESS && ppData && *ppData) {
-        // Grampeia o endereço físico onde a geometria reside na RAM do PC
         ponteiro_vertices_jogo = *ppData;
         tamanho_buffer_vertices = size;
     }
     return res;
 }
 
-// ------------------------------------------------------------------
-// HOOK DE DESENHO MODIFICADO
-// ------------------------------------------------------------------
 static VKAPI_ATTR void VKAPI_CALL MyHook_vkCmdDraw(
     VkCommandBuffer commandBuffer,
     uint32_t vertexCount,
@@ -98,11 +87,8 @@ static VKAPI_ATTR void VKAPI_CALL MyHook_vkCmdDraw(
     uint32_t firstVertex,
     uint32_t firstInstance)
 {
-    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] vkCmdDraw! Serializando e enviando geometria...\n");
-
-    // Se tivermos os vértices grampeados na RAM e a rede ativa, jogamos no cabo USB
     if (rede_inicializada && ponteiro_vertices_jogo && tamanho_buffer_vertices > 0) {
-        const size_t MAX_PACKET_SIZE = 1400; // MTU seguro contra fragmentação
+        const size_t MAX_PACKET_SIZE = 1400; 
         size_t bytes_despachados = 0;
         char* ponteiro_dados = (char*)ponteiro_vertices_jogo;
 
@@ -118,9 +104,22 @@ static VKAPI_ATTR void VKAPI_CALL MyHook_vkCmdDraw(
     }
 }
 
-// ------------------------------------------------------------------
-// CRIAÇÃO E DESTRUIÇÃO DA INSTÂNCIA (Adaptado do ChatGPT)
-// ------------------------------------------------------------------
+// --- NOSSO NOVO GANCHO DE FIM DE QUADRO (PRESENT) ---
+static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
+    VkQueue queue,
+    const VkPresentInfoKHR* pPresentInfo)
+{
+    // Esse print vai provar que o PC terminou de processar o frame e está sincronizado com o tempo de tela
+    std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] vkQueuePresentKHR! Fim de frame alcancado no PC.\n");
+
+    // No próximo passo, inseriremos aqui o bloco receptor UDP para resgatar os pixels do Moto G71
+
+    if (nextQueuePresentKHR) {
+        return nextQueuePresentKHR(queue, pPresentInfo);
+    }
+    return VK_SUCCESS;
+}
+
 extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
     const VkInstanceCreateInfo* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
@@ -139,7 +138,7 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
 
     if (result == VK_SUCCESS) {
         currentInstance = *pInstance;
-        inicializarRedeProxy(); // Aciona a rede com IP dinâmico
+        inicializarRedeProxy(); 
         nextDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(nextGIPA(*pInstance, "vkDestroyInstance"));
     }
     return result;
@@ -154,9 +153,6 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance, con
     }
 }
 
-// ------------------------------------------------------------------
-// CRIAÇÃO E DESTRUIÇÃO DO DISPOSITIVO (Adaptado do ChatGPT)
-// ------------------------------------------------------------------
 extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkPhysicalDevice physicalDevice,
     const VkDeviceCreateInfo* pCreateInfo,
@@ -182,7 +178,11 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
         nextGDPA = layerNextGDPA;
         nextDestroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(nextGDPA(*pDevice, "vkDestroyDevice"));
         nextCmdDraw = reinterpret_cast<PFN_vkCmdDraw>(nextGDPA(*pDevice, "vkCmdDraw"));
-        std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] vkCreateDevice OK; Tunel Gráfico Pronto!\n");
+        
+        // Mapeia e intercepta a função de apresentação
+        nextQueuePresentKHR = reinterpret_cast<PFN_vkQueuePresentKHR>(nextGDPA(*pDevice, "vkQueuePresentKHR"));
+        
+        std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] vkCreateDevice OK; Tunel Grafico e Apresentacao Prontos!\n");
     }
     return result;
 }
@@ -192,13 +192,11 @@ extern "C" VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice device, const VkA
     if (device == currentDevice) {
         currentDevice = VK_NULL_HANDLE;
         nextCmdDraw = nullptr;
+        nextQueuePresentKHR = nullptr;
         nextGDPA = nullptr;
     }
 }
 
-// ------------------------------------------------------------------
-// DESPACHADORES MESTRES RESOLUTION (Adaptados do ChatGPT)
-// ------------------------------------------------------------------
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (!pName) return nullptr;
     if (std::strcmp(pName, "vkGetInstanceProcAddr") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkGetInstanceProcAddr);
@@ -215,8 +213,12 @@ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice
     if (!pName) return nullptr;
     if (std::strcmp(pName, "vkGetDeviceProcAddr") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceProcAddr);
     if (std::strcmp(pName, "vkDestroyDevice") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkDestroyDevice);
-    if (std::strcmp(pName, "vkMapMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkMapMemory); // Gancho injetado
+    if (std::strcmp(pName, "vkMapMemory") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkMapMemory); 
     if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(MyHook_vkCmdDraw);
+    
+    // Vincula o gancho de apresentação na tabela de despacho do dispositivo
+    if (std::strcmp(pName, "vkQueuePresentKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(MyHook_vkQueuePresentKHR);
+
     if (nextGDPA) return nextGDPA(device, pName);
     return nullptr;
 }
