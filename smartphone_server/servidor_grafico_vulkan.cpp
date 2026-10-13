@@ -342,7 +342,12 @@ int main() {
                     real_vkUnmapMemory(vk.device, vk.vertexBufferMemory);
                 }
             }
-            sendto(sockfd, &current_frame_id, sizeof(current_frame_id), 0, (const struct sockaddr *)&cliaddr, len);
+            // --- SUBSTITUA A LINHA DO SENDTO ANTIGA NO CELULAR POR ESTA: ---
+            // Força o envio do ACK especificamente para a porta 65433 aberta na thread do PC
+            struct sockaddr_in target_ack_addr = cliaddr;
+            target_ack_addr.sin_port = htons(65433);
+
+            sendto(sockfd, &current_frame_id, sizeof(current_frame_id), 0, (const struct sockaddr *)&target_ack_addr, sizeof(target_ack_addr));
         }
     }
     close(sockfd); limparVulkan(vk); return 0;

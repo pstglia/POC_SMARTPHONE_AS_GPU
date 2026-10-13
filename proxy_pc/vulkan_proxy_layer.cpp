@@ -37,7 +37,7 @@ static bool tcp_inicializado = false;
 
 static char buffer_envio_global[64 * 1024];
 static std::vector<char> cache_geometria_local;
-static bool tem_geometria_pronta = false;
+static std::atomic<bool> tem_geometria_pronta(false); // Garante visibilidade entre threads da CPU
 
 static VkDeviceSize tamanho_mapeado_atual = 0;
 static void* ponteiro_mapeado_atual = nullptr;
@@ -49,17 +49,37 @@ static std::atomic<uint32_t> frame_confirmado_id(0);
 static const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
 void threadEscutaACK() {
+    int udp_receive_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    int opt_reuse = 1;
+    setsockopt(udp_receive_fd, SOL_SOCKET, SO_REUSEADDR, &opt_reuse, sizeof(opt_reuse));
+
+    struct sockaddr_in local_recv_addr;
+    std::memset(&local_recv_addr, 0, sizeof(local_recv_addr));
+    local_recv_addr.sin_family = AF_INET;
+    
+    // CORREÇÃO: Força o socket do PC a escutar em modo promíscuo aberto para qualquer 
+    // IP vindo da sub-rede do cabo USB, casando estritamente apenas a porta 65433
+    local_recv_addr.sin_addr.s_addr = htonl(INADDR_ANY); 
+    local_recv_addr.sin_port = htons(65433); 
+
+    if (bind(udp_receive_fd, (struct sockaddr*)&local_recv_addr, sizeof(local_recv_addr)) < 0) {
+        std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Erro ao fixar porta de escuta UDP 65433.\n");
+        return;
+    }
+
     uint32_t ack_frame_received = 0;
     struct sockaddr_in de_addr;
     socklen_t de_len = sizeof(de_addr);
-    int flags = fcntl(sockfd, F_GETFL, 0);
-    fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
+
+    // Loop paralelo bloqueante estável
     while (rede_inicializada) {
-        ssize_t ack_res = recvfrom(sockfd, &ack_frame_received, sizeof(ack_frame_received), MSG_WAITALL, (struct sockaddr *)&de_addr, &de_len);
+        ssize_t ack_res = recvfrom(udp_receive_fd, &ack_frame_received, sizeof(ack_frame_received), 0, (struct sockaddr *)&de_addr, &de_len);
         if (ack_res > 0) {
+            // Destrava o Sliding Window de forma atômica
             frame_confirmado_id.store(ack_frame_received);
         }
     }
+    close(udp_receive_fd);
 }
 
 void inicializarRedeProxyComThread() {
@@ -68,10 +88,11 @@ void inicializarRedeProxyComThread() {
     std::thread(threadEscutaACK).detach();
 }
 
+// --- INICIALIZADOR DE REDE PURIFICADO DO PC ---
 void inicializarRedeProxy() {
     if (rede_inicializada) return;
     
-    // 1. CONEXÃO MESTRE TCP (Porta 65431)
+    // 1. CONEXÃO MESTRE TCP (Porta 65431 - Controle)
     tcp_client_fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in tcp_servaddr;
     std::memset(&tcp_servaddr, 0, sizeof(tcp_servaddr));
@@ -86,11 +107,9 @@ void inicializarRedeProxy() {
     if (connect(tcp_client_fd, (struct sockaddr*)&tcp_servaddr, sizeof(tcp_servaddr)) >= 0) {
         tcp_inicializado = true;
         std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Canal TCP de controle ativado com Sucesso!\n");
-    } else {
-        std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Erro: Celular nao respondeu no canal TCP.\n");
     }
 
-    // 2. CONEXÃO DE STREAMING UDP (Porta 65432)
+    // 2. CONEXÃO DE STREAMING UDP (Porta 65432 - Geometria de Entrada)
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     std::memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
@@ -148,7 +167,6 @@ static VKAPI_ATTR void VKAPI_CALL MyHook_vkCmdDraw(VkCommandBuffer commandBuffer
     if (nextCmdDraw) nextCmdDraw(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
-// --- GANCHO PRESENT (Mantido Estável com o Sliding Window Atômico) ---
 static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
     VkQueue queue,
     const VkPresentInfoKHR* pPresentInfo)
@@ -173,8 +191,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
         usleep(500); 
     }
 
-    // CORREÇÃO: Alinhamento de concorrência. Se o cache na RAM do PC possui dados, envia sempre!
-    if (rede_inicializada && !cache_geometria_local.empty()) {
+    // CORREÇÃO DE THREAD BARRIER: Checa a flag atômica para garantir sincronia no PC real AMD
+    if (rede_inicializada && tem_geometria_pronta.load() && !cache_geometria_local.empty()) {
         const size_t MAX_PAYLOAD_SIZE = 1400; 
         size_t bytes_despachados = 0;
         size_t tamanho_total_vbo = cache_geometria_local.size();
