@@ -36,6 +36,8 @@ typedef void (*PFN_vkUnmapMemory)(VkDevice, VkDeviceMemory);
 typedef void (*PFN_vkDestroyBuffer)(VkDevice, VkBuffer, const VkAllocationCallbacks*);
 typedef VkResult (*PFN_vkCreateFramebuffer)(VkDevice, const VkFramebufferCreateInfo*, const VkAllocationCallbacks*, VkFramebuffer*);
 typedef void (*PFN_vkDestroyFramebuffer)(VkDevice, VkFramebuffer, const VkAllocationCallbacks*);
+typedef VkResult (*PFN_vkQueueSubmit)(VkQueue, uint32_t, const VkSubmitInfo*, VkFence);
+typedef VkResult (*PFN_vkQueueWaitIdle)(VkQueue);
 
 
 typedef VkResult (*PFN_vkCreateCommandPool)(VkDevice, const VkCommandPoolCreateInfo*, const VkAllocationCallbacks*, VkCommandPool*);
@@ -47,6 +49,8 @@ typedef VkResult (*PFN_vkCreateRenderPass)(VkDevice, const VkRenderPassCreateInf
 typedef void (*PFN_vkDestroyRenderPass)(VkDevice, VkRenderPass, const VkAllocationCallbacks*);
 static PFN_vkCreateFramebuffer real_vkCreateFramebuffer = nullptr;
 static PFN_vkDestroyFramebuffer real_vkDestroyFramebuffer = nullptr;
+typedef void (*PFN_vkCmdBeginRenderPass)(VkCommandBuffer, const VkRenderPassBeginInfo*, VkSubpassContents);
+typedef void (*PFN_vkCmdEndRenderPass)(VkCommandBuffer);
 
 static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
 static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices = nullptr;
@@ -77,6 +81,12 @@ static PFN_vkDestroyCommandPool real_vkDestroyCommandPool = nullptr;
 
 static PFN_vkCreateRenderPass real_vkCreateRenderPass = nullptr;
 static PFN_vkDestroyRenderPass real_vkDestroyRenderPass = nullptr;
+
+static PFN_vkQueueSubmit real_vkQueueSubmit = nullptr;
+static PFN_vkQueueWaitIdle real_vkQueueWaitIdle = nullptr;
+
+static PFN_vkCmdBeginRenderPass real_vkCmdBeginRenderPass = nullptr;
+static PFN_vkCmdEndRenderPass real_vkCmdEndRenderPass = nullptr;
 
 void* vulkan_lib = nullptr;
 
@@ -117,6 +127,12 @@ bool carregarFuncoesVulkan() {
     typedef VkResult (*PFN_vkCreateImageView)(VkDevice, const VkImageViewCreateInfo*, const VkAllocationCallbacks*, VkImageView*);
     typedef void (*PFN_vkDestroyImageView)(VkDevice, VkImageView, const VkAllocationCallbacks*);
     static PFN_vkCreateImageView real_vkCreateImageView = (PFN_vkCreateImageView)dlsym(vulkan_lib, "vkCreateImageView");
+
+    real_vkQueueSubmit = (PFN_vkQueueSubmit)dlsym(vulkan_lib, "vkQueueSubmit");
+    real_vkQueueWaitIdle = (PFN_vkQueueWaitIdle)dlsym(vulkan_lib, "vkQueueWaitIdle");
+
+    real_vkCmdBeginRenderPass = (PFN_vkCmdBeginRenderPass)dlsym(vulkan_lib, "vkCmdBeginRenderPass");
+    real_vkCmdEndRenderPass = (PFN_vkCmdEndRenderPass)dlsym(vulkan_lib, "vkCmdEndRenderPass");
 
     return true;
 }
@@ -449,11 +465,41 @@ int main() {
                     real_vkUnmapMemory(vk.device, vk.vertexBufferMemory);
                 }
             }
-            // --- SUBSTITUA A LINHA DO SENDTO ANTIGA NO CELULAR POR ESTA: ---
-            // Força o envio do ACK especificamente para a porta 65433 aberta na thread do PC
+
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+            if (real_vkBeginCommandBuffer(vk.commandBuffer, &beginInfo) == VK_SUCCESS) {
+                VkRenderPassBeginInfo renderPassInfo{};
+                renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+                renderPassInfo.renderPass = vk.renderPass;
+                renderPassInfo.framebuffer = vk.framebuffer;
+                renderPassInfo.renderArea.offset = {0, 0};
+                renderPassInfo.renderArea.extent = {RES_WIDTH, RES_HEIGHT};
+
+                VkClearValue clearColor = {{{0.0f, 0.8f, 0.4f, 1.0f}}};
+                renderPassInfo.clearValueCount = 1;
+                renderPassInfo.pClearValues = &clearColor;
+
+                // Chamadas corrigidas apontando para os ponteiros dinâmicos reais da Qualcomm
+                real_vkCmdBeginRenderPass(vk.commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+                real_vkCmdEndRenderPass(vk.commandBuffer);
+                
+                real_vkEndCommandBuffer(vk.commandBuffer);
+
+                VkSubmitInfo submitInfo{};
+                submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                submitInfo.commandBufferCount = 1;
+                submitInfo.pCommandBuffers = &vk.commandBuffer;
+
+                real_vkQueueSubmit(vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
+                real_vkQueueWaitIdle(vk.queue);
+                std::cout << "[Adreno 619] Quadro " << current_frame_id << " processado em hardware com Clear Color!" << std::endl;
+            }
+
             struct sockaddr_in target_ack_addr = cliaddr;
             target_ack_addr.sin_port = htons(65433);
-
             sendto(sockfd, &current_frame_id, sizeof(current_frame_id), 0, (const struct sockaddr *)&target_ack_addr, sizeof(target_ack_addr));
         }
     }
