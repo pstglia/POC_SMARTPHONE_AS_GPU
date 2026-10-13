@@ -34,6 +34,9 @@ typedef VkResult (*PFN_vkBindBufferMemory)(VkDevice, VkBuffer, VkDeviceMemory, V
 typedef VkResult (*PFN_vkMapMemory)(VkDevice, VkDeviceMemory, VkDeviceSize, VkDeviceSize, VkMemoryMapFlags, void**);
 typedef void (*PFN_vkUnmapMemory)(VkDevice, VkDeviceMemory);
 typedef void (*PFN_vkDestroyBuffer)(VkDevice, VkBuffer, const VkAllocationCallbacks*);
+typedef VkResult (*PFN_vkCreateFramebuffer)(VkDevice, const VkFramebufferCreateInfo*, const VkAllocationCallbacks*, VkFramebuffer*);
+typedef void (*PFN_vkDestroyFramebuffer)(VkDevice, VkFramebuffer, const VkAllocationCallbacks*);
+
 
 typedef VkResult (*PFN_vkCreateCommandPool)(VkDevice, const VkCommandPoolCreateInfo*, const VkAllocationCallbacks*, VkCommandPool*);
 typedef VkResult (*PFN_vkAllocateCommandBuffers)(VkDevice, const VkCommandBufferAllocateInfo*, VkCommandBuffer*);
@@ -42,6 +45,8 @@ typedef VkResult (*PFN_vkEndCommandBuffer)(VkCommandBuffer);
 typedef void (*PFN_vkDestroyCommandPool)(VkDevice, VkCommandPool, const VkAllocationCallbacks*);
 typedef VkResult (*PFN_vkCreateRenderPass)(VkDevice, const VkRenderPassCreateInfo*, const VkAllocationCallbacks*, VkRenderPass*);
 typedef void (*PFN_vkDestroyRenderPass)(VkDevice, VkRenderPass, const VkAllocationCallbacks*);
+static PFN_vkCreateFramebuffer real_vkCreateFramebuffer = nullptr;
+static PFN_vkDestroyFramebuffer real_vkDestroyFramebuffer = nullptr;
 
 static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
 static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices = nullptr;
@@ -105,6 +110,13 @@ bool carregarFuncoesVulkan() {
     real_vkDestroyCommandPool = (PFN_vkDestroyCommandPool)dlsym(vulkan_lib, "vkDestroyCommandPool");
     real_vkCreateRenderPass = (PFN_vkCreateRenderPass)dlsym(vulkan_lib, "vkCreateRenderPass");
     real_vkDestroyRenderPass = (PFN_vkDestroyRenderPass)dlsym(vulkan_lib, "vkDestroyRenderPass");
+    real_vkCreateFramebuffer = (PFN_vkCreateFramebuffer)dlsym(vulkan_lib, "vkCreateFramebuffer");
+    real_vkDestroyFramebuffer = (PFN_vkDestroyFramebuffer)dlsym(vulkan_lib, "vkDestroyFramebuffer");
+    
+    // Puxa tambem o construtor de View, obrigatorio para amarrar imagens a Framebuffers no Vulkan
+    typedef VkResult (*PFN_vkCreateImageView)(VkDevice, const VkImageViewCreateInfo*, const VkAllocationCallbacks*, VkImageView*);
+    typedef void (*PFN_vkDestroyImageView)(VkDevice, VkImageView, const VkAllocationCallbacks*);
+    static PFN_vkCreateImageView real_vkCreateImageView = (PFN_vkCreateImageView)dlsym(vulkan_lib, "vkCreateImageView");
 
     return true;
 }
@@ -122,6 +134,8 @@ struct ContextoVulkanHeadless {
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     VkRenderPass renderPass = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    VkImageView headlessImageView = VK_NULL_HANDLE; // Handle auxiliar para mapeamento
 };
 
 uint32_t encontrarTipoMemoria(VkPhysicalDevice physicalDevice, uint32_t tipoFiltro, VkMemoryPropertyFlags propriedades) {
@@ -213,6 +227,9 @@ bool inicializarVulkanHeadless(ContextoVulkanHeadless& vk) {
 }
 
 void limparVulkan(ContextoVulkanHeadless& vk) {
+    typedef void (*PFN_vkDestroyImageView)(VkDevice, VkImageView, const VkAllocationCallbacks*);
+    static PFN_vkDestroyImageView f_vkDestroyImageView = (PFN_vkDestroyImageView)dlsym(vulkan_lib, "vkDestroyImageView");
+
     if (vk.commandPool != VK_NULL_HANDLE) real_vkDestroyCommandPool(vk.device, vk.commandPool, nullptr);
 
     if (vk.vertexBuffer != VK_NULL_HANDLE) real_vkDestroyBuffer(vk.device, vk.vertexBuffer, nullptr);
@@ -223,6 +240,9 @@ void limparVulkan(ContextoVulkanHeadless& vk) {
     if (vk.instance != VK_NULL_HANDLE) real_vkDestroyInstance(vk.instance, nullptr);
     if (vulkan_lib) dlclose(vulkan_lib);
     if (vk.renderPass != VK_NULL_HANDLE) real_vkDestroyRenderPass(vk.device, vk.renderPass, nullptr);
+
+    if (vk.framebuffer != VK_NULL_HANDLE) real_vkDestroyFramebuffer(vk.device, vk.framebuffer, nullptr);
+    if (vk.headlessImageView != VK_NULL_HANDLE) f_vkDestroyImageView(vk.device, vk.headlessImageView, nullptr);
 }
 
 // --- FUNÇÃO DE CRIAÇÃO DA FILA DE COMANDOS HEADLESS ---
@@ -285,6 +305,46 @@ bool inicializarRenderPassHeadless(ContextoVulkanHeadless& vk) {
     }
 
     std::cout << "[+] VkRenderPass Headless alocado com sucesso na memoria da GPU Qualcomm!" << std::endl;
+    return true;
+}
+
+bool inicializarFramebufferHeadless(ContextoVulkanHeadless& vk) {
+    // 1. Criação da ImageView (Ponte conceitual exigida pela especificação Vulkan)
+    typedef VkResult (*PFN_vkCreateImageView)(VkDevice, const VkImageViewCreateInfo*, const VkAllocationCallbacks*, VkImageView*);
+    static PFN_vkCreateImageView f_vkCreateImageView = (PFN_vkCreateImageView)dlsym(vulkan_lib, "vkCreateImageView");
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = vk.headlessImage;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+
+    if (f_vkCreateImageView(vk.device, &viewInfo, nullptr, &vk.headlessImageView) != VK_SUCCESS) {
+        std::cerr << "[-] Falha ao alocar VkImageView na Adreno." << std::endl;
+        return false;
+    }
+
+    // 2. Criação do Framebuffer Casado com o RenderPass Headless
+    VkFramebufferCreateInfo framebufferInfo{};
+    framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebufferInfo.renderPass = vk.renderPass;
+    framebufferInfo.attachmentCount = 1;
+    framebufferInfo.pAttachments = &vk.headlessImageView; // Vincula a nossa VRAM invisivel
+    framebufferInfo.width = RES_WIDTH;
+    framebufferInfo.height = RES_HEIGHT;
+    framebufferInfo.layers = 1;
+
+    if (real_vkCreateFramebuffer(vk.device, &framebufferInfo, nullptr, &vk.framebuffer) != VK_SUCCESS) {
+        std::cerr << "[-] Falha ao instanciar VkFramebuffer Headless." << std::endl;
+        return false;
+    }
+
+    std::cout << "[+] VkFramebuffer Headless (" << RES_WIDTH << "x" << RES_HEIGHT << ") selado com sucesso na Adreno 619!" << std::endl;
     return true;
 }
 
@@ -357,6 +417,7 @@ int main() {
 
     if (!inicializarFilaComandosHeadless(vk)) return -1;
     if (!inicializarRenderPassHeadless(vk)) return -1;
+    if (!inicializarFramebufferHeadless(vk)) return -1; 
 
     std::cout << "[*] Canal UDP pronto para receber VBOs na porta " << PORT << "..." << std::endl;
 
