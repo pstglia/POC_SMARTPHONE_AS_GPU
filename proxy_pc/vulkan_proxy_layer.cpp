@@ -191,8 +191,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
         usleep(500); 
     }
 
-    // CORREÇÃO DE THREAD BARRIER: Checa a flag atômica para garantir sincronia no PC real AMD
-    if (rede_inicializada && tem_geometria_pronta.load() && !cache_geometria_local.empty()) {
+    // CONDICIONAL PURIFICADA: Se o cache na RAM do PC contém os 262KB do cubo, 
+    // bombardeia o cabo USB de forma incondicional frame por frame!
+    if (rede_inicializada && !cache_geometria_local.empty()) {
         const size_t MAX_PAYLOAD_SIZE = 1400; 
         size_t bytes_despachados = 0;
         size_t tamanho_total_vbo = cache_geometria_local.size();

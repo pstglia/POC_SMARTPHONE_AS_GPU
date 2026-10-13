@@ -51,6 +51,7 @@ static PFN_vkCreateFramebuffer real_vkCreateFramebuffer = nullptr;
 static PFN_vkDestroyFramebuffer real_vkDestroyFramebuffer = nullptr;
 typedef void (*PFN_vkCmdBeginRenderPass)(VkCommandBuffer, const VkRenderPassBeginInfo*, VkSubpassContents);
 typedef void (*PFN_vkCmdEndRenderPass)(VkCommandBuffer);
+typedef void (*PFN_vkCmdCopyImageToBuffer)(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, uint32_t, const VkBufferImageCopy*);
 
 static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
 static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices = nullptr;
@@ -87,6 +88,7 @@ static PFN_vkQueueWaitIdle real_vkQueueWaitIdle = nullptr;
 
 static PFN_vkCmdBeginRenderPass real_vkCmdBeginRenderPass = nullptr;
 static PFN_vkCmdEndRenderPass real_vkCmdEndRenderPass = nullptr;
+static PFN_vkCmdCopyImageToBuffer real_vkCmdCopyImageToBuffer = nullptr;
 
 void* vulkan_lib = nullptr;
 
@@ -134,6 +136,8 @@ bool carregarFuncoesVulkan() {
     real_vkCmdBeginRenderPass = (PFN_vkCmdBeginRenderPass)dlsym(vulkan_lib, "vkCmdBeginRenderPass");
     real_vkCmdEndRenderPass = (PFN_vkCmdEndRenderPass)dlsym(vulkan_lib, "vkCmdEndRenderPass");
 
+    real_vkCmdCopyImageToBuffer = (PFN_vkCmdCopyImageToBuffer)dlsym(vulkan_lib, "vkCmdCopyImageToBuffer");
+
     return true;
 }
 
@@ -152,6 +156,10 @@ struct ContextoVulkanHeadless {
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkImageView headlessImageView = VK_NULL_HANDLE; // Handle auxiliar para mapeamento
+    // --- NOVOS COMPONENTES DO READBACK DE PIXELS ---
+    VkBuffer pixelTransferBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory pixelTransferMemory = VK_NULL_HANDLE;
+    VkDeviceSize tamanhoBufferPixels = 691200; // 480 * 360 * 4 bytes RGBA
 };
 
 uint32_t encontrarTipoMemoria(VkPhysicalDevice physicalDevice, uint32_t tipoFiltro, VkMemoryPropertyFlags propriedades) {
@@ -259,6 +267,8 @@ void limparVulkan(ContextoVulkanHeadless& vk) {
 
     if (vk.framebuffer != VK_NULL_HANDLE) real_vkDestroyFramebuffer(vk.device, vk.framebuffer, nullptr);
     if (vk.headlessImageView != VK_NULL_HANDLE) f_vkDestroyImageView(vk.device, vk.headlessImageView, nullptr);
+    if (vk.pixelTransferBuffer != VK_NULL_HANDLE) real_vkDestroyBuffer(vk.device, vk.pixelTransferBuffer, nullptr);
+    if (vk.pixelTransferMemory != VK_NULL_HANDLE) real_vkFreeMemory(vk.device, vk.pixelTransferMemory, nullptr);
 }
 
 // --- FUNÇÃO DE CRIAÇÃO DA FILA DE COMANDOS HEADLESS ---
@@ -364,6 +374,38 @@ bool inicializarFramebufferHeadless(ContextoVulkanHeadless& vk) {
     return true;
 }
 
+bool inicializarBufferReadbackHeadless(ContextoVulkanHeadless& vk) {
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = vk.tamanhoBufferPixels;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; // Alvo de transferencia de copia de imagem
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (real_vkCreateBuffer(vk.device, &bufferInfo, nullptr, &vk.pixelTransferBuffer) != VK_SUCCESS) {
+        std::cerr << "[-] Falha ao alocar VkBuffer de Readback no smartphone." << std::endl;
+        return false;
+    }
+
+    VkMemoryRequirements memRequirements;
+    real_vkGetBufferMemoryRequirements(vk.device, vk.pixelTransferBuffer, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    // Força alocação visível para a CPU ler e coerente para não precisar dar Flush/Invalidate de cache
+    allocInfo.memoryTypeIndex = encontrarTipoMemoria(vk.physicalDevice, memRequirements.memoryTypeBits, 
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+    if (real_vkAllocateMemory(vk.device, &allocInfo, nullptr, &vk.pixelTransferMemory) != VK_SUCCESS) {
+        std::cerr << "[-] Falha de barramento ao queimar VRAM para o buffer de captura." << std::endl;
+        return false;
+    }
+
+    real_vkBindBufferMemory(vk.device, vk.pixelTransferBuffer, vk.pixelTransferMemory, 0);
+    std::cout << "[+] Buffer de Transferencia de Pixels (691.2 KB) alocado de forma estavel na Adreno 619!" << std::endl;
+    return true;
+}
+
 int main() {
     ContextoVulkanHeadless vk;
     if (!inicializarVulkanHeadless(vk)) return -1;
@@ -379,7 +421,11 @@ int main() {
     tcp_serv_addr.sin_addr.s_addr = INADDR_ANY;
     tcp_serv_addr.sin_port = htons(65431);
 
-    bind(tcp_listen_fd, (struct sockaddr*)&tcp_serv_addr, sizeof(tcp_serv_addr));
+    if (bind(tcp_listen_fd, (struct sockaddr*)&tcp_serv_addr, sizeof(tcp_serv_addr)) < 0) {
+        std::cerr << "[-] Erro ao dar bind no socket TCP mestre." << std::endl;
+        return -1;
+    }
+
     listen(tcp_listen_fd, 1);
     std::cout << "[*] Servidor TCP de Inicializacao Ativo na porta 65431..." << std::endl;
 
@@ -392,7 +438,7 @@ int main() {
         while (true) {
             uint32_t tag_comando = 0;
             ssize_t r_tag = recv(tcp_client_fd, &tag_comando, 4, MSG_WAITALL);
-            if (r_tag <= 0) break; // Conexão fechada ao fim do setup inicial
+            if (r_tag <= 0) break; // Conexão fechada de forma limpa pelo PC após setup
 
             if (tag_comando == 0x53484452) { // Tag "[SHDR]"
                 uint32_t tamanho_shader = 0;
@@ -401,7 +447,6 @@ int main() {
                 std::vector<uint32_t> spirv_buffer(tamanho_shader / 4);
                 recv(tcp_client_fd, spirv_buffer.data(), tamanho_shader, MSG_WAITALL);
 
-                // COMPILAÇÃO DINÂMICA DIRETO NO SILÍCIO DA QUALCOMM!
                 VkShaderModuleCreateInfo shaderInfo{};
                 static PFN_vkCreateShaderModule real_vkCreateShaderModule = (PFN_vkCreateShaderModule)dlsym(vulkan_lib, "vkCreateShaderModule");
                 shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -420,20 +465,29 @@ int main() {
     }
     close(tcp_listen_fd);
 
-    // --- 2. CONFIGURAÇÃO DO STREAMING UDP GEOMÉTRICO (Porta 65432) ---
-    int sockfd; struct sockaddr_in servaddr, cliaddr;
+    // --- 2. INSTANCIAÇÃO DOS INFRAESTRUTURAS GRÁFICAS LOCAIS ---
+    if (!inicializarFilaComandosHeadless(vk)) return -1;
+    if (!inicializarRenderPassHeadless(vk)) return -1;
+    if (!inicializarFramebufferHeadless(vk)) return -1;
+    if (!inicializarBufferReadbackHeadless(vk)) return -1;
+
+    // --- 3. CONFIGURAÇÃO DO STREAMING UDP GEOMÉTRICO (Porta 65432) ---
+    int sockfd;
+    struct sockaddr_in servaddr, cliaddr;
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    int optval_rcv = 4 * 1024 * 1024;
+
+    int optval_rcv = 4 * 1024 * 1024; // 4 Megabytes de cache de rede
     setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &optval_rcv, sizeof(optval_rcv));
+
     std::memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = INADDR_ANY;
     servaddr.sin_port = htons(PORT);
-    bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr));
 
-    if (!inicializarFilaComandosHeadless(vk)) return -1;
-    if (!inicializarRenderPassHeadless(vk)) return -1;
-    if (!inicializarFramebufferHeadless(vk)) return -1; 
+    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+        std::cerr << "[-] Erro ao dar bind no socket UDP." << std::endl;
+        return -1;
+    }
 
     std::cout << "[*] Canal UDP pronto para receber VBOs na porta " << PORT << "..." << std::endl;
 
@@ -441,23 +495,39 @@ int main() {
     std::vector<char> frame_geometry_accumulator;
     socklen_t len = sizeof(cliaddr);
 
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
+
     while (true) {
         frame_geometry_accumulator.clear();
-        size_t bytes_recebidos_vbo = 0; uint32_t tamanho_esperado = 0; uint32_t current_frame_id = 0; bool frame_concluido = false;
+        size_t bytes_recebidos_vbo = 0;
+        uint32_t tamanho_esperado = 0;
+        uint32_t current_frame_id = 0;
+        bool frame_concluido = false;
+
         while (true) {
             ssize_t n = recvfrom(sockfd, socket_read_buffer.data(), MAX_BUFFER_SIZE, 0, (struct sockaddr *)&cliaddr, &len);
             if (n <= 0) continue;
+
             if (n >= 12) {
                 std::memcpy(&tamanho_esperado, socket_read_buffer.data(), 4);
                 std::memcpy(&current_frame_id, socket_read_buffer.data() + 4, 4);
-                uint32_t chunk_id; std::memcpy(&chunk_id, socket_read_buffer.data() + 8, 4);
+                uint32_t chunk_id;
+                std::memcpy(&chunk_id, socket_read_buffer.data() + 8, 4);
+
                 size_t tamanho_payload = n - 12;
                 frame_geometry_accumulator.insert(frame_geometry_accumulator.end(), socket_read_buffer.begin() + 12, socket_read_buffer.begin() + n);
                 bytes_recebidos_vbo += tamanho_payload;
-                if (bytes_recebidos_vbo >= tamanho_esperado) { frame_concluido = true; break; }
+
+                if (bytes_recebidos_vbo >= tamanho_esperado) {
+                    frame_concluido = true;
+                    break;
+                }
             }
         }
+
         if (frame_concluido && bytes_recebidos_vbo == tamanho_esperado) {
+            // A: Injeta a geometria recebida na VRAM do celular de forma assíncrona
             if (alocarVertexBufferDinamico(vk, bytes_recebidos_vbo)) {
                 void* ptrVRAM = nullptr;
                 if (real_vkMapMemory(vk.device, vk.vertexBufferMemory, 0, bytes_recebidos_vbo, 0, &ptrVRAM) == VK_SUCCESS && ptrVRAM) {
@@ -466,6 +536,7 @@ int main() {
                 }
             }
 
+            // B: GRAVAÇÃO E SUBMISSÃO GRÁFICA HEADLESS (Pintura e Cópia de Pixels)
             VkCommandBufferBeginInfo beginInfo{};
             beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -478,30 +549,71 @@ int main() {
                 renderPassInfo.renderArea.offset = {0, 0};
                 renderPassInfo.renderArea.extent = {RES_WIDTH, RES_HEIGHT};
 
+                // Verde Esmeralda clássico de teste (RGBA)
                 VkClearValue clearColor = {{{0.0f, 0.8f, 0.4f, 1.0f}}};
                 renderPassInfo.clearValueCount = 1;
                 renderPassInfo.pClearValues = &clearColor;
 
-                // Chamadas corrigidas apontando para os ponteiros dinâmicos reais da Qualcomm
+                // 1. Executa a limpeza da tela virtual
                 real_vkCmdBeginRenderPass(vk.commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
                 real_vkCmdEndRenderPass(vk.commandBuffer);
                 
+                // 2. CONFIGURAÇÃO DA CÓPIA INTERNA DE VRAM PARA HOST RAM
+                VkBufferImageCopy region{};
+                region.bufferOffset = 0;
+                region.bufferRowLength = 0;
+                region.bufferImageHeight = 0;
+                region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                region.imageSubresource.mipLevel = 0;
+                region.imageSubresource.baseArrayLayer = 0;
+                region.imageSubresource.layerCount = 1;
+                region.imageOffset = {0, 0, 0};
+                region.imageExtent = {RES_WIDTH, RES_HEIGHT, 1};
+
+                // 3. Copia a imagem processada para o buffer linear legível pela CPU
+                real_vkCmdCopyImageToBuffer(
+                    vk.commandBuffer,
+                    vk.headlessImage,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    vk.pixelTransferBuffer,
+                    1,
+                    &region
+                );
+
                 real_vkEndCommandBuffer(vk.commandBuffer);
 
+                // 4. Submete a esteira de gravação diretamente para o silício da Qualcomm
                 VkSubmitInfo submitInfo{};
                 submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                 submitInfo.commandBufferCount = 1;
                 submitInfo.pCommandBuffers = &vk.commandBuffer;
 
                 real_vkQueueSubmit(vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
+
+                // 5. Bloqueio rígido: Espera a GPU terminar o processamento físico
                 real_vkQueueWaitIdle(vk.queue);
-                std::cout << "[Adreno 619] Quadro " << current_frame_id << " processado em hardware com Clear Color!" << std::endl;
+                std::cout << "[Adreno 619] Quadro " << current_frame_id << " rasterizado e copiado para o Buffer de Readback!" << std::endl;
+
+                // 6. SANITY CHECK: Valida a assinatura de cores na memória mapeada
+                void* ptrPixelsLocais = nullptr;
+                if (real_vkMapMemory(vk.device, vk.pixelTransferMemory, 0, vk.tamanhoBufferPixels, 0, &ptrPixelsLocais) == VK_SUCCESS && ptrPixelsLocais) {
+                    unsigned char* bytes_rgba = (unsigned char*)ptrPixelsLocais;
+                    std::cout << "[Readback Check] Pixel 0 RGBA: ("
+                              << (int)bytes_rgba[0] << ", " << (int)bytes_rgba[1] << ", "
+                              << (int)bytes_rgba[2] << ", " << (int)bytes_rgba[3] << ")" << std::endl;
+
+                    real_vkUnmapMemory(vk.device, vk.pixelTransferMemory);
+                }
             }
 
+            // C: Devolve o ACK para a porta fixa do PC real destravar o Sliding Window
             struct sockaddr_in target_ack_addr = cliaddr;
             target_ack_addr.sin_port = htons(65433);
             sendto(sockfd, &current_frame_id, sizeof(current_frame_id), 0, (const struct sockaddr *)&target_ack_addr, sizeof(target_ack_addr));
         }
     }
-    close(sockfd); limparVulkan(vk); return 0;
+
+    close(sockfd);
+    limparVulkan(vk);
+    return 0;
 }
