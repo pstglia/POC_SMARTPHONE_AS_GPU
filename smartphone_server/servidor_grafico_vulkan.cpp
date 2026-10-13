@@ -40,6 +40,8 @@ typedef VkResult (*PFN_vkAllocateCommandBuffers)(VkDevice, const VkCommandBuffer
 typedef VkResult (*PFN_vkBeginCommandBuffer)(VkCommandBuffer, const VkCommandBufferBeginInfo*);
 typedef VkResult (*PFN_vkEndCommandBuffer)(VkCommandBuffer);
 typedef void (*PFN_vkDestroyCommandPool)(VkDevice, VkCommandPool, const VkAllocationCallbacks*);
+typedef VkResult (*PFN_vkCreateRenderPass)(VkDevice, const VkRenderPassCreateInfo*, const VkAllocationCallbacks*, VkRenderPass*);
+typedef void (*PFN_vkDestroyRenderPass)(VkDevice, VkRenderPass, const VkAllocationCallbacks*);
 
 static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
 static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices = nullptr;
@@ -68,6 +70,8 @@ static PFN_vkBeginCommandBuffer real_vkBeginCommandBuffer = nullptr;
 static PFN_vkEndCommandBuffer real_vkEndCommandBuffer = nullptr;
 static PFN_vkDestroyCommandPool real_vkDestroyCommandPool = nullptr;
 
+static PFN_vkCreateRenderPass real_vkCreateRenderPass = nullptr;
+static PFN_vkDestroyRenderPass real_vkDestroyRenderPass = nullptr;
 
 void* vulkan_lib = nullptr;
 
@@ -99,6 +103,8 @@ bool carregarFuncoesVulkan() {
     real_vkBeginCommandBuffer = (PFN_vkBeginCommandBuffer)dlsym(vulkan_lib, "vkBeginCommandBuffer");
     real_vkEndCommandBuffer = (PFN_vkEndCommandBuffer)dlsym(vulkan_lib, "vkEndCommandBuffer");
     real_vkDestroyCommandPool = (PFN_vkDestroyCommandPool)dlsym(vulkan_lib, "vkDestroyCommandPool");
+    real_vkCreateRenderPass = (PFN_vkCreateRenderPass)dlsym(vulkan_lib, "vkCreateRenderPass");
+    real_vkDestroyRenderPass = (PFN_vkDestroyRenderPass)dlsym(vulkan_lib, "vkDestroyRenderPass");
 
     return true;
 }
@@ -115,6 +121,7 @@ struct ContextoVulkanHeadless {
     VkDeviceSize tamanhoBufferAlocado = 0;
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkRenderPass renderPass = VK_NULL_HANDLE;
 };
 
 uint32_t encontrarTipoMemoria(VkPhysicalDevice physicalDevice, uint32_t tipoFiltro, VkMemoryPropertyFlags propriedades) {
@@ -215,6 +222,7 @@ void limparVulkan(ContextoVulkanHeadless& vk) {
     if (vk.device != VK_NULL_HANDLE) real_vkDestroyDevice(vk.device, nullptr);
     if (vk.instance != VK_NULL_HANDLE) real_vkDestroyInstance(vk.instance, nullptr);
     if (vulkan_lib) dlclose(vulkan_lib);
+    if (vk.renderPass != VK_NULL_HANDLE) real_vkDestroyRenderPass(vk.device, vk.renderPass, nullptr);
 }
 
 // --- FUNÇÃO DE CRIAÇÃO DA FILA DE COMANDOS HEADLESS ---
@@ -241,6 +249,42 @@ bool inicializarFilaComandosHeadless(ContextoVulkanHeadless& vk) {
     }
 
     std::cout << "[+] Factory de Comandos e VkCommandBuffer instanciados na GPU do smartphone!" << std::endl;
+    return true;
+}
+
+bool inicializarRenderPassHeadless(ContextoVulkanHeadless& vk) {
+    VkAttachmentDescription colorAttachment{};
+    colorAttachment.format = VK_FORMAT_R8G8B8A8_UNORM; // Casado com o formato da nossa VkImage Headless
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;   // Limpa a tela no inicio do frame!
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE; // Salva o resultado na VRAM no final
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; // Pronto para copia/retorno
+
+    VkAttachmentReference colorAttachmentRef{};
+    colorAttachmentRef.attachment = 0;
+    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorAttachmentRef;
+
+    VkRenderPassCreateInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+
+    if (real_vkCreateRenderPass(vk.device, &renderPassInfo, nullptr, &vk.renderPass) != VK_SUCCESS) {
+        std::cerr << "[-] Falha ao instanciar VkRenderPass na Adreno." << std::endl;
+        return false;
+    }
+
+    std::cout << "[+] VkRenderPass Headless alocado com sucesso na memoria da GPU Qualcomm!" << std::endl;
     return true;
 }
 
@@ -312,6 +356,8 @@ int main() {
     bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr));
 
     if (!inicializarFilaComandosHeadless(vk)) return -1;
+    if (!inicializarRenderPassHeadless(vk)) return -1;
+
     std::cout << "[*] Canal UDP pronto para receber VBOs na porta " << PORT << "..." << std::endl;
 
     std::vector<char> socket_read_buffer(MAX_BUFFER_SIZE);
