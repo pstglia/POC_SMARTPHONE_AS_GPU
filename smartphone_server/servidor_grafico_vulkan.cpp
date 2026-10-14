@@ -54,6 +54,11 @@ typedef void (*PFN_vkCmdBeginRenderPass)(VkCommandBuffer, const VkRenderPassBegi
 typedef void (*PFN_vkCmdEndRenderPass)(VkCommandBuffer);
 typedef void (*PFN_vkCmdCopyImageToBuffer)(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, uint32_t, const VkBufferImageCopy*);
 
+typedef VkResult (*PFN_vkCreatePipelineLayout)(VkDevice, const VkPipelineLayoutCreateInfo*, const VkAllocationCallbacks*, VkPipelineLayout*);
+typedef VkResult (*PFN_vkCreateGraphicsPipelines)(VkDevice, VkPipelineCache, uint32_t, const VkGraphicsPipelineCreateInfo*, const VkAllocationCallbacks*, VkPipeline*);
+typedef void (*PFN_vkDestroyPipelineLayout)(VkDevice, VkPipelineLayout, const VkAllocationCallbacks*);
+typedef void (*PFN_vkDestroyPipeline)(VkDevice, VkPipeline, const VkAllocationCallbacks*);
+
 static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
 static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices = nullptr;
 static PFN_vkGetPhysicalDeviceProperties real_vkGetPhysicalDeviceProperties = nullptr;
@@ -90,6 +95,11 @@ static PFN_vkQueueWaitIdle real_vkQueueWaitIdle = nullptr;
 static PFN_vkCmdBeginRenderPass real_vkCmdBeginRenderPass = nullptr;
 static PFN_vkCmdEndRenderPass real_vkCmdEndRenderPass = nullptr;
 static PFN_vkCmdCopyImageToBuffer real_vkCmdCopyImageToBuffer = nullptr;
+
+static PFN_vkCreatePipelineLayout real_vkCreatePipelineLayout = nullptr;
+static PFN_vkCreateGraphicsPipelines real_vkCreateGraphicsPipelines = nullptr;
+static PFN_vkDestroyPipelineLayout real_vkDestroyPipelineLayout = nullptr;
+static PFN_vkDestroyPipeline real_vkDestroyPipeline = nullptr;
 
 void* vulkan_lib = nullptr;
 
@@ -142,6 +152,11 @@ bool carregarFuncoesVulkan() {
 
     real_vkCmdCopyImageToBuffer = (PFN_vkCmdCopyImageToBuffer)dlsym(vulkan_lib, "vkCmdCopyImageToBuffer");
 
+    real_vkCreatePipelineLayout = (PFN_vkCreatePipelineLayout)dlsym(vulkan_lib, "vkCreatePipelineLayout");
+    real_vkCreateGraphicsPipelines = (PFN_vkCreateGraphicsPipelines)dlsym(vulkan_lib, "vkCreateGraphicsPipelines");
+    real_vkDestroyPipelineLayout = (PFN_vkDestroyPipelineLayout)dlsym(vulkan_lib, "vkDestroyPipelineLayout");
+    real_vkDestroyPipeline = (PFN_vkDestroyPipeline)dlsym(vulkan_lib, "vkDestroyPipeline");
+
     return true;
 }
 
@@ -164,6 +179,12 @@ struct ContextoVulkanHeadless {
     VkBuffer pixelTransferBuffer = VK_NULL_HANDLE;
     VkDeviceMemory pixelTransferMemory = VK_NULL_HANDLE;
     VkDeviceSize tamanhoBufferPixels = 691200; // 480 * 360 * 4 bytes RGBA
+    VkShaderModule vertShaderModule = VK_NULL_HANDLE;
+    VkShaderModule fragShaderModule = VK_NULL_HANDLE;
+    
+    // --- NOVOS ARTEFATOS DO PIPELINE DE DESENHO ---
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline graphicsPipeline = VK_NULL_HANDLE;
 };
 
 uint32_t encontrarTipoMemoria(VkPhysicalDevice physicalDevice, uint32_t tipoFiltro, VkMemoryPropertyFlags propriedades) {
@@ -273,6 +294,8 @@ void limparVulkan(ContextoVulkanHeadless& vk) {
     if (vk.headlessImageView != VK_NULL_HANDLE) f_vkDestroyImageView(vk.device, vk.headlessImageView, nullptr);
     if (vk.pixelTransferBuffer != VK_NULL_HANDLE) real_vkDestroyBuffer(vk.device, vk.pixelTransferBuffer, nullptr);
     if (vk.pixelTransferMemory != VK_NULL_HANDLE) real_vkFreeMemory(vk.device, vk.pixelTransferMemory, nullptr);
+    if (vk.graphicsPipeline != VK_NULL_HANDLE) real_vkDestroyPipeline(vk.device, vk.graphicsPipeline, nullptr);
+    if (vk.pipelineLayout != VK_NULL_HANDLE) real_vkDestroyPipelineLayout(vk.device, vk.pipelineLayout, nullptr);
 }
 
 // --- FUNÇÃO DE CRIAÇÃO DA FILA DE COMANDOS HEADLESS ---
@@ -410,11 +433,135 @@ bool inicializarBufferReadbackHeadless(ContextoVulkanHeadless& vk) {
     return true;
 }
 
+bool inicializarPipelineGraficoHeadless(ContextoVulkanHeadless& vk) {
+    if (vk.vertShaderModule == VK_NULL_HANDLE || vk.fragShaderModule == VK_NULL_HANDLE) return false;
+
+    // CORREÇÃO: Array real de 2 elementos contíguos para casar com stageCount = 2
+    VkPipelineShaderStageCreateInfo shaderStages[2];
+    std::memset(shaderStages, 0, sizeof(shaderStages));
+    
+    shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shaderStages[0].module = vk.vertShaderModule;
+    shaderStages[0].pName = "main";
+
+    shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    shaderStages[1].module = vk.fragShaderModule;
+    shaderStages[1].pName = "main";
+
+    VkVertexInputBindingDescription bindingDescription{};
+    bindingDescription.binding = 0;
+    bindingDescription.stride = 24; 
+    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    // CORREÇÃO: Array real de 2 atributos contíguos para Posição + Cor/Normal
+    VkVertexInputAttributeDescription attributeDescriptions[2];
+    std::memset(attributeDescriptions, 0, sizeof(attributeDescriptions));
+    
+    attributeDescriptions[0].binding = 0;
+    attributeDescriptions[0].location = 0;
+    attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributeDescriptions[0].offset = 0;
+
+    attributeDescriptions[1].binding = 0;
+    attributeDescriptions[1].location = 1;
+    attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+    attributeDescriptions[1].offset = 12;
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+    vertexInputInfo.vertexAttributeDescriptionCount = 2;
+    vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+    VkViewport viewport{0.0f, 0.0f, (float)RES_WIDTH, (float)RES_HEIGHT, 0.0f, 1.0f};
+    VkRect2D scissor{{0, 0}, {RES_WIDTH, RES_HEIGHT}};
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.pViewports = &viewport;
+    viewportState.scissorCount = 1;
+    viewportState.pScissors = &scissor;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling{};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &colorBlendAttachment;
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+    if (real_vkCreatePipelineLayout(vk.device, &pipelineLayoutInfo, nullptr, &vk.pipelineLayout) != VK_SUCCESS) return false;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisampling;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    
+    // CORREÇÃO ADRENA 619 HEADLESS: O Clang exige a passagem explícita do VertexInput estruturado
+    pipelineInfo.pVertexInputState = &vertexInputInfo; 
+    
+    pipelineInfo.layout = vk.pipelineLayout;
+    pipelineInfo.renderPass = vk.renderPass;
+    pipelineInfo.subpass = 0;
+
+    if (real_vkCreateGraphicsPipelines(vk.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vk.graphicsPipeline) != VK_SUCCESS) {
+        std::cerr << "[-] Falha ao compilar VkPipeline na Adreno." << std::endl;
+        return false;
+    }
+
+    std::cout << "[+] Maquina de Estados (VkPipeline) compilada de forma nativa na Adreno 619!" << std::endl;
+    return true;
+}
+
 int main() {
     ContextoVulkanHeadless vk;
-    if (!inicializarVulkanHeadless(vk)) return -1;
+    if (!inicializarVulkanHeadless(vk)) {
+        std::cerr << "[-] Erro ao inicializar Vulkan Headless." << std::endl;
+        return -1;
+    }
 
-    // --- 1. CONFIGURAÇÃO DO SERVIDOR TCP DE INICIALIZAÇÃO (Porta 65431 - USB) ---
+    // ==================================================================
+    // 1. ANTECIPAÇÃO DA INFRAESTRUTURA GRÁFICA LOCAL (BLINDAGEM CONTRA CRASH 255)
+    // ==================================================================
+    if (!inicializarFilaComandosHeadless(vk)) return -1;
+    if (!inicializarRenderPassHeadless(vk)) return -1;
+    if (!inicializarFramebufferHeadless(vk)) return -1;
+    if (!inicializarBufferReadbackHeadless(vk)) return -1;
+
+    // ==================================================================
+    // 2. CONFIGURAÇÃO DO SERVIDOR TCP DE CONTROLE E SHADERS (Porta 65431)
+    // ==================================================================
     int tcp_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int opt_tcp = 1;
     setsockopt(tcp_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt_tcp, sizeof(opt_tcp));
@@ -425,7 +572,11 @@ int main() {
     tcp_serv_addr.sin_addr.s_addr = INADDR_ANY;
     tcp_serv_addr.sin_port = htons(65431);
 
-    if (bind(tcp_listen_fd, (struct sockaddr*)&tcp_serv_addr, sizeof(tcp_serv_addr)) < 0) return -1;
+    if (bind(tcp_listen_fd, (struct sockaddr*)&tcp_serv_addr, sizeof(tcp_serv_addr)) < 0) {
+        std::cerr << "[-] Erro ao dar bind no socket TCP." << std::endl;
+        return -1;
+    }
+
     listen(tcp_listen_fd, 1);
     std::cout << "[*] Servidor TCP de Inicializacao Ativo na porta 65431..." << std::endl;
 
@@ -433,15 +584,16 @@ int main() {
     int tcp_client_fd = accept(tcp_listen_fd, (struct sockaddr*)&tcp_cli_addr, &tcp_len);
     
     if (tcp_client_fd >= 0) {
-        std::cout << "[+] Canal TCP Conectado! Carregando Shaders..." << std::endl;
+        std::cout << "[+] Canal TCP Conectado! Carregando Shaders dinamicos..." << std::endl;
         while (true) {
             uint32_t tag_comando = 0;
             ssize_t r_tag = recv(tcp_client_fd, &tag_comando, 4, MSG_WAITALL);
             if (r_tag <= 0) break;
 
-            if (tag_comando == 0x53484452) {
+            if (tag_comando == 0x53484452) { // Tag "[SHDR]"
                 uint32_t tamanho_shader = 0;
                 recv(tcp_client_fd, &tamanho_shader, 4, MSG_WAITALL);
+
                 std::vector<uint32_t> spirv_buffer(tamanho_shader / 4);
                 recv(tcp_client_fd, spirv_buffer.data(), tamanho_shader, MSG_WAITALL);
 
@@ -451,33 +603,45 @@ int main() {
                 shaderInfo.codeSize = tamanho_shader;
                 shaderInfo.pCode = spirv_buffer.data();
 
-                VkShaderModule modulo_temporario;
-                real_vkCreateShaderModule(vk.device, &shaderInfo, nullptr, &modulo_temporario);
-                uint32_t status_ok = 0x4B4F2B5B;
-                send(tcp_client_fd, &status_ok, 4, 0);
+                VkShaderModule* modulo_alvo = (vk.vertShaderModule == VK_NULL_HANDLE) ? &vk.vertShaderModule : &vk.fragShaderModule;
+
+                if (real_vkCreateShaderModule(vk.device, &shaderInfo, nullptr, modulo_alvo) == VK_SUCCESS) {
+                    std::cout << "[Vulkan GPU] SUCESSO: Shader de " << tamanho_shader << " bytes compilado na Adreno 619!" << std::endl;
+                    uint32_t status_ok = 0x4B4F2B5B; // "[+OK]"
+                    send(tcp_client_fd, &status_ok, 4, 0);
+                }
             }
         }
         close(tcp_client_fd);
     }
     close(tcp_listen_fd);
 
-    if (!inicializarFilaComandosHeadless(vk)) return -1;
-    if (!inicializarRenderPassHeadless(vk)) return -1;
-    if (!inicializarFramebufferHeadless(vk)) return -1;
-    if (!inicializarBufferReadbackHeadless(vk)) return -1;
+    // COMPILAÇÃO COMPATÍVEL DA MÁQUINA DE ESTADOS DINÂMICA
+    if (!inicializarPipelineGraficoHeadless(vk)) {
+        std::cerr << "[-] Erro ao instanciar VkPipeline grafico." << std::endl;
+        return -1;
+    }
 
-    // --- 2. CONFIGURAÇÃO DO STREAMING UDP GEOMÉTRICO (Porta 65432 - USB) ---
-    int sockfd; struct sockaddr_in servaddr, cliaddr;
+    // ==================================================================
+    // 3. CONFIGURAÇÃO DO STREAMING UDP GEOMÉTRICO (Porta 65432 - USB)
+    // ==================================================================
+    int sockfd; 
+    struct sockaddr_in servaddr, cliaddr;
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+
     int optval_rcv = 4 * 1024 * 1024;
     setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &optval_rcv, sizeof(optval_rcv));
+
     std::memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = INADDR_ANY;
     servaddr.sin_port = htons(PORT);
-    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) return -1;
 
-    // --- 3. CONFIGURAÇÃO DO RETORNO DE VÍDEO (Porta 65434 - RETORNO VIA CABO USB) ---
+    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
+        std::cerr << "[-] Erro ao dar bind no socket UDP." << std::endl;
+        return -1;
+    }
+
     video_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     std::memset(&pc_video_addr, 0, sizeof(pc_video_addr));
     pc_video_addr.sin_family = AF_INET;
@@ -488,9 +652,6 @@ int main() {
     std::vector<char> socket_read_buffer(MAX_BUFFER_SIZE);
     std::vector<char> frame_geometry_accumulator;
     socklen_t len = sizeof(cliaddr);
-
-    int flags = fcntl(sockfd, F_GETFL, 0);
-    fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
 
     uint32_t total_frames_recebidos = 0;
 
@@ -549,27 +710,32 @@ int main() {
 
                 real_vkQueueSubmit(vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
                 real_vkQueueWaitIdle(vk.queue);
-                
+
                 // --- SUB-SAMPLING DE VÍDEO UNIFICADO NO CABO (1 a cada 30 frames) ---
                 if (total_frames_recebidos % 30 == 0) {
                     void* ptrPixelsLocais = nullptr;
                     if (real_vkMapMemory(vk.device, vk.pixelTransferMemory, 0, vk.tamanhoBufferPixels, 0, &ptrPixelsLocais) == VK_SUCCESS && ptrPixelsLocais) {
                         
-                        // CORREÇÃO: Alinha o IP de retorno explicitamente para a interface do cabo USB!
                         pc_video_addr.sin_addr = cliaddr.sin_addr;
 
                         const size_t VIDEO_PAYLOAD_SIZE = 1400;
-                        size_t pixels_despachados = 0; uint32_t video_chunk_id = 0;
+                        size_t pixels_despachados = 0; 
+                        uint32_t video_chunk_id = 0;
                         char* ponteiro_video = (char*)ptrPixelsLocais;
-                        static char buffer_transmissao_video[1408];
+
+                        // CORREÇÃO CIRÚRGICA: Aloca explicitamente o array contíguo de 1408 bytes na stack
+                        char buffer_transmissao_video[1408];
 
                         while (pixels_despachados < vk.tamanhoBufferPixels) {
                             size_t bloco_video = std::min(VIDEO_PAYLOAD_SIZE, (size_t)vk.tamanhoBufferPixels - pixels_despachados);
-                            std::memcpy(&buffer_transmissao_video[0], &current_frame_id, 4);
-                            std::memcpy(&buffer_transmissao_video[4], &video_chunk_id, 4);
-                            std::memcpy(&buffer_transmissao_video[8], ponteiro_video + pixels_despachados, bloco_video);
+                            
+                            // Distribui os dados nos offsets corretos do array linear
+                            std::memcpy(buffer_transmissao_video, &current_frame_id, 4);       // Bytes 0 a 3
+                            std::memcpy(buffer_transmissao_video + 4, &video_chunk_id, 4);    // Bytes 4 a 7
+                            std::memcpy(buffer_transmissao_video + 8, ponteiro_video + pixels_despachados, bloco_video); // Byte 8 em diante
 
-                            sendto(video_sockfd, &buffer_transmissao_video[0], 8 + bloco_video, 0, (const struct sockaddr *)&pc_video_addr, sizeof(pc_video_addr));
+                            sendto(video_sockfd, buffer_transmissao_video, 8 + bloco_video, 0, (const struct sockaddr *)&pc_video_addr, sizeof(pc_video_addr));
+                            
                             pixels_despachados += bloco_video;
                             video_chunk_id++;
                             usleep(2);
@@ -578,9 +744,9 @@ int main() {
                         std::cout << "[USB Video] Frame " << current_frame_id << " enviado pelo cabo (Amostragem 1:30)." << std::endl;
                     }
                 }
+
             }
 
-            // Responde o ACK regulador para destravar a janela assíncrona do PC real
             struct sockaddr_in target_ack_addr = cliaddr;
             target_ack_addr.sin_port = htons(65433);
             sendto(sockfd, &current_frame_id, sizeof(current_frame_id), 0, (const struct sockaddr *)&target_ack_addr, sizeof(target_ack_addr));
