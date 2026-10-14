@@ -389,7 +389,6 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion
     return VK_SUCCESS;
 }
 
-// --- GANCHO DE SHADERS CORRIGIDO COM FECHAMENTO DE CONEXÃO CONTROLOGADA ---
 extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     VkDevice device,
     const VkShaderModuleCreateInfo* pCreateInfo,
@@ -402,13 +401,13 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
 
     std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] vkCreateShaderModule: %lu bytes\n", pCreateInfo->codeSize);
 
-    // Rastreia estaticamente quantos shaders o vkcube já compilou (são 2 no total)
     static int shaders_compilados_count = 0;
 
     if (tcp_inicializado && pCreateInfo->codeSize > 0) {
         uint32_t tipo_comando = 0x53484452; // Tag "[SHDR]"
         uint32_t tamanho_shader = (uint32_t)pCreateInfo->codeSize;
 
+        // --- CANAL PURIFICADO 100% TCP PARA SETUP SEGURO ---
         send(tcp_client_fd, &tipo_comando, 4, 0);
         send(tcp_client_fd, &tamanho_shader, 4, 0);
         send(tcp_client_fd, pCreateInfo->pCode, pCreateInfo->codeSize, 0);
@@ -420,19 +419,21 @@ extern "C" VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
             shaders_compilados_count++;
         }
 
-        // XEQUE-MATE DO SINCRONISMO: Se compilou os dois shaders obrigatórios, desliga o TCP limpo!
         if (shaders_compilados_count >= 2) {
             std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Todos os Shaders enviados. Fechando canal TCP mestre...\n");
             
-            uint32_t comando_exit = 0x45584954; // Tag "[EXIT]" (4 bytes)
+            uint32_t comando_exit = 0x45584954; // Tag "[EXIT]"
             send(tcp_client_fd, &comando_exit, 4, 0);
             
-            // Fecha o socket fisicamente no PC real e desativa a flag de controle
             close(tcp_client_fd);
             tcp_client_fd = -1;
             tcp_inicializado = false;
+
+            // Cool-down de rede estável de 50ms para transição de barramento
+            usleep(50000); 
         }
     }
 
     return nextCreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);
 }
+

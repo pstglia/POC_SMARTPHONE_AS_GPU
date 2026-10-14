@@ -59,6 +59,9 @@ typedef VkResult (*PFN_vkCreateGraphicsPipelines)(VkDevice, VkPipelineCache, uin
 typedef void (*PFN_vkDestroyPipelineLayout)(VkDevice, VkPipelineLayout, const VkAllocationCallbacks*);
 typedef void (*PFN_vkDestroyPipeline)(VkDevice, VkPipeline, const VkAllocationCallbacks*);
 
+typedef void (*PFN_vkCmdBindPipeline)(VkCommandBuffer, VkPipelineBindPoint, VkPipeline);
+typedef void (*PFN_vkCmdBindVertexBuffers)(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize*);
+
 static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
 static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices = nullptr;
 static PFN_vkGetPhysicalDeviceProperties real_vkGetPhysicalDeviceProperties = nullptr;
@@ -100,6 +103,9 @@ static PFN_vkCreatePipelineLayout real_vkCreatePipelineLayout = nullptr;
 static PFN_vkCreateGraphicsPipelines real_vkCreateGraphicsPipelines = nullptr;
 static PFN_vkDestroyPipelineLayout real_vkDestroyPipelineLayout = nullptr;
 static PFN_vkDestroyPipeline real_vkDestroyPipeline = nullptr;
+
+static PFN_vkCmdBindPipeline real_vkCmdBindPipeline = nullptr;
+static PFN_vkCmdBindVertexBuffers real_vkCmdBindVertexBuffers = nullptr;
 
 void* vulkan_lib = nullptr;
 
@@ -156,6 +162,8 @@ bool carregarFuncoesVulkan() {
     real_vkCreateGraphicsPipelines = (PFN_vkCreateGraphicsPipelines)dlsym(vulkan_lib, "vkCreateGraphicsPipelines");
     real_vkDestroyPipelineLayout = (PFN_vkDestroyPipelineLayout)dlsym(vulkan_lib, "vkDestroyPipelineLayout");
     real_vkDestroyPipeline = (PFN_vkDestroyPipeline)dlsym(vulkan_lib, "vkDestroyPipeline");
+    real_vkCmdBindPipeline = (PFN_vkCmdBindPipeline)dlsym(vulkan_lib, "vkCmdBindPipeline");
+    real_vkCmdBindVertexBuffers = (PFN_vkCmdBindVertexBuffers)dlsym(vulkan_lib, "vkCmdBindVertexBuffers");
 
     return true;
 }
@@ -552,7 +560,7 @@ int main() {
     }
 
     // ==================================================================
-    // 1. ANTECIPAÇÃO DA INFRAESTRUTURA GRÁFICA LOCAL (BLINDAGEM CONTRA CRASH 255)
+    // 1. ANTECIPAÇÃO DA INFRAESTRUTURA GRÁFICA LOCAL (PROTEÇÃO DE STACK)
     // ==================================================================
     if (!inicializarFilaComandosHeadless(vk)) return -1;
     if (!inicializarRenderPassHeadless(vk)) return -1;
@@ -621,7 +629,6 @@ int main() {
         std::cerr << "[-] Erro ao instanciar VkPipeline grafico." << std::endl;
         return -1;
     }
-
     // ==================================================================
     // 3. CONFIGURAÇÃO DO STREAMING UDP GEOMÉTRICO (Porta 65432 - USB)
     // ==================================================================
@@ -699,8 +706,55 @@ int main() {
                 renderPassInfo.clearValueCount = 1;
                 renderPassInfo.pClearValues = &clearColor;
 
+                // A: Renderiza e limpa a tela virtual com o verde
                 real_vkCmdBeginRenderPass(vk.commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+                if (vk.vertexBuffer != VK_NULL_HANDLE && vk.graphicsPipeline != VK_NULL_HANDLE) {
+                    real_vkCmdBindPipeline(vk.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.graphicsPipeline);
+                    VkDeviceSize offsets[] = {0};
+                    real_vkCmdBindVertexBuffers(vk.commandBuffer, 0, 1, &vk.vertexBuffer, offsets);
+                    
+                    static PFN_vkCmdDraw real_vkCmdDraw = (PFN_vkCmdDraw)dlsym(vulkan_lib, "vkCmdDraw");
+                    if (real_vkCmdDraw) {
+                        real_vkCmdDraw(vk.commandBuffer, 36, 1, 0, 0);
+                    }
+                }
                 real_vkCmdEndRenderPass(vk.commandBuffer);
+
+                // ==================================================================
+                // B: BARREIRA GRÁFICA DE TRANSIÇÃO DE LAYOUT DA IMAGEM
+                // ==================================================================
+                typedef void (*PFN_vkCmdPipelineBarrier)(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*, uint32_t, const VkImageMemoryBarrier*);
+                static PFN_vkCmdPipelineBarrier real_vkCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)dlsym(vulkan_lib, "vkCmdPipelineBarrier");
+
+                VkImageMemoryBarrier imageBarrier{};
+                imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                imageBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; 
+                imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;     
+                imageBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                imageBarrier.image = vk.headlessImage;
+                imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                imageBarrier.subresourceRange.baseMipLevel = 0;
+                imageBarrier.subresourceRange.levelCount = 1;
+                imageBarrier.subresourceRange.baseArrayLayer = 0;
+                imageBarrier.subresourceRange.layerCount = 1;
+
+                if (real_vkCmdPipelineBarrier) {
+                    real_vkCmdPipelineBarrier(
+                        vk.commandBuffer,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0, 0, nullptr, 0, nullptr, 1, &imageBarrier
+                    );
+                }
+
+                // C: CÓPIA INTERNA DA TEXTURA PARA O BUFFER
+                VkBufferImageCopy region{};
+                region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                region.imageSubresource.layerCount = 1;
+                region.imageExtent = {RES_WIDTH, RES_HEIGHT, 1};
+
+                real_vkCmdCopyImageToBuffer(vk.commandBuffer, vk.headlessImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.pixelTransferBuffer, 1, &region);
                 real_vkEndCommandBuffer(vk.commandBuffer);
 
                 VkSubmitInfo submitInfo{};
@@ -711,31 +765,23 @@ int main() {
                 real_vkQueueSubmit(vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
                 real_vkQueueWaitIdle(vk.queue);
 
-                // --- SUB-SAMPLING DE VÍDEO UNIFICADO NO CABO (1 a cada 30 frames) ---
+                // --- D: TRANSMISSÃO DE VÍDEO NO CABO (Amostragem 1:30) ---
                 if (total_frames_recebidos % 30 == 0) {
                     void* ptrPixelsLocais = nullptr;
                     if (real_vkMapMemory(vk.device, vk.pixelTransferMemory, 0, vk.tamanhoBufferPixels, 0, &ptrPixelsLocais) == VK_SUCCESS && ptrPixelsLocais) {
-                        
                         pc_video_addr.sin_addr = cliaddr.sin_addr;
-
                         const size_t VIDEO_PAYLOAD_SIZE = 1400;
-                        size_t pixels_despachados = 0; 
-                        uint32_t video_chunk_id = 0;
+                        size_t pixels_despachados = 0; uint32_t video_chunk_id = 0;
                         char* ponteiro_video = (char*)ptrPixelsLocais;
-
-                        // CORREÇÃO CIRÚRGICA: Aloca explicitamente o array contíguo de 1408 bytes na stack
                         char buffer_transmissao_video[1408];
 
                         while (pixels_despachados < vk.tamanhoBufferPixels) {
                             size_t bloco_video = std::min(VIDEO_PAYLOAD_SIZE, (size_t)vk.tamanhoBufferPixels - pixels_despachados);
-                            
-                            // Distribui os dados nos offsets corretos do array linear
-                            std::memcpy(buffer_transmissao_video, &current_frame_id, 4);       // Bytes 0 a 3
-                            std::memcpy(buffer_transmissao_video + 4, &video_chunk_id, 4);    // Bytes 4 a 7
-                            std::memcpy(buffer_transmissao_video + 8, ponteiro_video + pixels_despachados, bloco_video); // Byte 8 em diante
+                            std::memcpy(buffer_transmissao_video, &current_frame_id, 4);
+                            std::memcpy(buffer_transmissao_video + 4, &video_chunk_id, 4);
+                            std::memcpy(buffer_transmissao_video + 8, ponteiro_video + pixels_despachados, bloco_video);
 
                             sendto(video_sockfd, buffer_transmissao_video, 8 + bloco_video, 0, (const struct sockaddr *)&pc_video_addr, sizeof(pc_video_addr));
-                            
                             pixels_despachados += bloco_video;
                             video_chunk_id++;
                             usleep(2);
@@ -744,7 +790,6 @@ int main() {
                         std::cout << "[USB Video] Frame " << current_frame_id << " enviado pelo cabo (Amostragem 1:30)." << std::endl;
                     }
                 }
-
             }
 
             struct sockaddr_in target_ack_addr = cliaddr;
