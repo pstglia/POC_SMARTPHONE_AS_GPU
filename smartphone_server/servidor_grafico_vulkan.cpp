@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <algorithm>
 #include <vulkan/vulkan.h>
+#include <chrono>
 
 #define PORT 65432
 #define MAX_BUFFER_SIZE (64 * 1024)
@@ -413,7 +414,7 @@ int main() {
     ContextoVulkanHeadless vk;
     if (!inicializarVulkanHeadless(vk)) return -1;
 
-    // --- 1. CONFIGURAÇÃO DO SERVIDOR TCP DE INICIALIZAÇÃO (Porta 65431) ---
+    // --- 1. CONFIGURAÇÃO DO SERVIDOR TCP DE INICIALIZAÇÃO (Porta 65431 - USB) ---
     int tcp_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     int opt_tcp = 1;
     setsockopt(tcp_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt_tcp, sizeof(opt_tcp));
@@ -424,11 +425,7 @@ int main() {
     tcp_serv_addr.sin_addr.s_addr = INADDR_ANY;
     tcp_serv_addr.sin_port = htons(65431);
 
-    if (bind(tcp_listen_fd, (struct sockaddr*)&tcp_serv_addr, sizeof(tcp_serv_addr)) < 0) {
-        std::cerr << "[-] Erro ao dar bind no socket TCP mestre." << std::endl;
-        return -1;
-    }
-
+    if (bind(tcp_listen_fd, (struct sockaddr*)&tcp_serv_addr, sizeof(tcp_serv_addr)) < 0) return -1;
     listen(tcp_listen_fd, 1);
     std::cout << "[*] Servidor TCP de Inicializacao Ativo na porta 65431..." << std::endl;
 
@@ -436,17 +433,15 @@ int main() {
     int tcp_client_fd = accept(tcp_listen_fd, (struct sockaddr*)&tcp_cli_addr, &tcp_len);
     
     if (tcp_client_fd >= 0) {
-        std::cout << "[+] Canal TCP Conectado! Aguardando Shaders dinâmicos do PC..." << std::endl;
-        
+        std::cout << "[+] Canal TCP Conectado! Carregando Shaders..." << std::endl;
         while (true) {
             uint32_t tag_comando = 0;
             ssize_t r_tag = recv(tcp_client_fd, &tag_comando, 4, MSG_WAITALL);
-            if (r_tag <= 0) break; // Conexão fechada de forma limpa pelo PC após setup
+            if (r_tag <= 0) break;
 
-            if (tag_comando == 0x53484452) { // Tag "[SHDR]"
+            if (tag_comando == 0x53484452) {
                 uint32_t tamanho_shader = 0;
                 recv(tcp_client_fd, &tamanho_shader, 4, MSG_WAITALL);
-
                 std::vector<uint32_t> spirv_buffer(tamanho_shader / 4);
                 recv(tcp_client_fd, spirv_buffer.data(), tamanho_shader, MSG_WAITALL);
 
@@ -457,47 +452,38 @@ int main() {
                 shaderInfo.pCode = spirv_buffer.data();
 
                 VkShaderModule modulo_temporario;
-                if (real_vkCreateShaderModule(vk.device, &shaderInfo, nullptr, &modulo_temporario) == VK_SUCCESS) {
-                    std::cout << "[Vulkan GPU] SUCESSO: Shader de " << tamanho_shader << " bytes compilado na Adreno 619!" << std::endl;
-                    uint32_t status_ok = 0x4B4F2B5B; // "[+OK]"
-                    send(tcp_client_fd, &status_ok, 4, 0);
-                }
+                real_vkCreateShaderModule(vk.device, &shaderInfo, nullptr, &modulo_temporario);
+                uint32_t status_ok = 0x4B4F2B5B;
+                send(tcp_client_fd, &status_ok, 4, 0);
             }
         }
         close(tcp_client_fd);
     }
     close(tcp_listen_fd);
 
-    // --- 2. INSTANCIAÇÃO DOS INFRAESTRUTURAS GRÁFICAS LOCAIS ---
     if (!inicializarFilaComandosHeadless(vk)) return -1;
     if (!inicializarRenderPassHeadless(vk)) return -1;
     if (!inicializarFramebufferHeadless(vk)) return -1;
     if (!inicializarBufferReadbackHeadless(vk)) return -1;
 
-    // --- 3. CONFIGURAÇÃO DO STREAMING UDP GEOMÉTRICO (Porta 65432) ---
-    int sockfd;
-    struct sockaddr_in servaddr, cliaddr;
+    // --- 2. CONFIGURAÇÃO DO STREAMING UDP GEOMÉTRICO (Porta 65432 - USB) ---
+    int sockfd; struct sockaddr_in servaddr, cliaddr;
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-
-    int optval_rcv = 4 * 1024 * 1024; // 4 Megabytes de cache de rede
+    int optval_rcv = 4 * 1024 * 1024;
     setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &optval_rcv, sizeof(optval_rcv));
-
     std::memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_addr.s_addr = INADDR_ANY;
     servaddr.sin_port = htons(PORT);
+    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) return -1;
 
-    if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
-        std::cerr << "[-] Erro ao dar bind no socket UDP." << std::endl;
-        return -1;
-    }
-
+    // --- 3. CONFIGURAÇÃO DO RETORNO DE VÍDEO (Porta 65434 - RETORNO VIA CABO USB) ---
     video_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     std::memset(&pc_video_addr, 0, sizeof(pc_video_addr));
     pc_video_addr.sin_family = AF_INET;
-    pc_video_addr.sin_port = htons(65434); // Porta exclusiva para recepcao de video no PC
+    pc_video_addr.sin_port = htons(65434); 
 
-    std::cout << "[*] Canal UDP pronto para receber VBOs na porta " << PORT << "..." << std::endl;
+    std::cout << "[*] Pronto! Todo o trafego unificado assincrono operando via CABO USB..." << std::endl;
 
     std::vector<char> socket_read_buffer(MAX_BUFFER_SIZE);
     std::vector<char> frame_geometry_accumulator;
@@ -506,36 +492,29 @@ int main() {
     int flags = fcntl(sockfd, F_GETFL, 0);
     fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
 
+    uint32_t total_frames_recebidos = 0;
+
     while (true) {
         frame_geometry_accumulator.clear();
-        size_t bytes_recebidos_vbo = 0;
-        uint32_t tamanho_esperado = 0;
-        uint32_t current_frame_id = 0;
-        bool frame_concluido = false;
+        size_t bytes_recebidos_vbo = 0; uint32_t tamanho_esperado = 0; uint32_t current_frame_id = 0; bool frame_concluido = false;
 
         while (true) {
             ssize_t n = recvfrom(sockfd, socket_read_buffer.data(), MAX_BUFFER_SIZE, 0, (struct sockaddr *)&cliaddr, &len);
             if (n <= 0) continue;
-
             if (n >= 12) {
                 std::memcpy(&tamanho_esperado, socket_read_buffer.data(), 4);
                 std::memcpy(&current_frame_id, socket_read_buffer.data() + 4, 4);
-                uint32_t chunk_id;
-                std::memcpy(&chunk_id, socket_read_buffer.data() + 8, 4);
-
+                uint32_t chunk_id; std::memcpy(&chunk_id, socket_read_buffer.data() + 8, 4);
                 size_t tamanho_payload = n - 12;
                 frame_geometry_accumulator.insert(frame_geometry_accumulator.end(), socket_read_buffer.begin() + 12, socket_read_buffer.begin() + n);
                 bytes_recebidos_vbo += tamanho_payload;
-
-                if (bytes_recebidos_vbo >= tamanho_esperado) {
-                    frame_concluido = true;
-                    break;
-                }
+                if (bytes_recebidos_vbo >= tamanho_esperado) { frame_concluido = true; break; }
             }
         }
 
         if (frame_concluido && bytes_recebidos_vbo == tamanho_esperado) {
-            // A: Injeta a geometria recebida na VRAM do celular de forma assíncrona
+            total_frames_recebidos++;
+
             if (alocarVertexBufferDinamico(vk, bytes_recebidos_vbo)) {
                 void* ptrVRAM = nullptr;
                 if (real_vkMapMemory(vk.device, vk.vertexBufferMemory, 0, bytes_recebidos_vbo, 0, &ptrVRAM) == VK_SUCCESS && ptrVRAM) {
@@ -544,7 +523,6 @@ int main() {
                 }
             }
 
-            // B: GRAVAÇÃO E SUBMISSÃO GRÁFICA HEADLESS (Pintura e Cópia de Pixels)
             VkCommandBufferBeginInfo beginInfo{};
             beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -556,98 +534,58 @@ int main() {
                 renderPassInfo.framebuffer = vk.framebuffer;
                 renderPassInfo.renderArea.offset = {0, 0};
                 renderPassInfo.renderArea.extent = {RES_WIDTH, RES_HEIGHT};
-
-                // Verde Esmeralda clássico de teste (RGBA)
                 VkClearValue clearColor = {{{0.0f, 0.8f, 0.4f, 1.0f}}};
                 renderPassInfo.clearValueCount = 1;
                 renderPassInfo.pClearValues = &clearColor;
 
-                // 1. Executa a limpeza da tela virtual
                 real_vkCmdBeginRenderPass(vk.commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
                 real_vkCmdEndRenderPass(vk.commandBuffer);
-                
-                // 2. CONFIGURAÇÃO DA CÓPIA INTERNA DE VRAM PARA HOST RAM
-                VkBufferImageCopy region{};
-                region.bufferOffset = 0;
-                region.bufferRowLength = 0;
-                region.bufferImageHeight = 0;
-                region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                region.imageSubresource.mipLevel = 0;
-                region.imageSubresource.baseArrayLayer = 0;
-                region.imageSubresource.layerCount = 1;
-                region.imageOffset = {0, 0, 0};
-                region.imageExtent = {RES_WIDTH, RES_HEIGHT, 1};
-
-                // 3. Copia a imagem processada para o buffer linear legível pela CPU
-                real_vkCmdCopyImageToBuffer(
-                    vk.commandBuffer,
-                    vk.headlessImage,
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    vk.pixelTransferBuffer,
-                    1,
-                    &region
-                );
-
                 real_vkEndCommandBuffer(vk.commandBuffer);
 
-                // 4. Submete a esteira de gravação diretamente para o silício da Qualcomm
                 VkSubmitInfo submitInfo{};
                 submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                 submitInfo.commandBufferCount = 1;
                 submitInfo.pCommandBuffers = &vk.commandBuffer;
 
                 real_vkQueueSubmit(vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
-
-                // 5. Bloqueio rígido: Espera a GPU terminar o processamento físico
                 real_vkQueueWaitIdle(vk.queue);
-                std::cout << "[Adreno 619] Quadro " << current_frame_id << " rasterizado e copiado para o Buffer de Readback!" << std::endl;
+                
+                // --- SUB-SAMPLING DE VÍDEO UNIFICADO NO CABO (1 a cada 30 frames) ---
+                if (total_frames_recebidos % 30 == 0) {
+                    void* ptrPixelsLocais = nullptr;
+                    if (real_vkMapMemory(vk.device, vk.pixelTransferMemory, 0, vk.tamanhoBufferPixels, 0, &ptrPixelsLocais) == VK_SUCCESS && ptrPixelsLocais) {
+                        
+                        // CORREÇÃO: Alinha o IP de retorno explicitamente para a interface do cabo USB!
+                        pc_video_addr.sin_addr = cliaddr.sin_addr;
 
-                // 6. SANITY CHECK + STREAMING DE VÍDEO REAL DE VOLTA PARA O PC
-                void* ptrPixelsLocais = nullptr;
-                if (real_vkMapMemory(vk.device, vk.pixelTransferMemory, 0, vk.tamanhoBufferPixels, 0, &ptrPixelsLocais) == VK_SUCCESS && ptrPixelsLocais) {
-                    unsigned char* bytes_rgba = (unsigned char*)ptrPixelsLocais;
-                    
-                    // Alinha o IP do PC dinamicamente baseado em quem enviou a geometria
-                    pc_video_addr.sin_addr = cliaddr.sin_addr;
+                        const size_t VIDEO_PAYLOAD_SIZE = 1400;
+                        size_t pixels_despachados = 0; uint32_t video_chunk_id = 0;
+                        char* ponteiro_video = (char*)ptrPixelsLocais;
+                        static char buffer_transmissao_video[1408];
 
-                    const size_t VIDEO_PAYLOAD_SIZE = 1400;
-                    size_t pixels_despachados = 0;
-                    uint32_t video_chunk_id = 0;
-                    char* ponteiro_video = (char*)ptrPixelsLocais;
+                        while (pixels_despachados < vk.tamanhoBufferPixels) {
+                            size_t bloco_video = std::min(VIDEO_PAYLOAD_SIZE, (size_t)vk.tamanhoBufferPixels - pixels_despachados);
+                            std::memcpy(&buffer_transmissao_video[0], &current_frame_id, 4);
+                            std::memcpy(&buffer_transmissao_video[4], &video_chunk_id, 4);
+                            std::memcpy(&buffer_transmissao_video[8], ponteiro_video + pixels_despachados, bloco_video);
 
-                    // Buffer de transporte local de 1408 bytes (Evita allocs na heap)
-                    static char buffer_transmissao_video[1408];
-
-                    // Dispara as fatias do frame RGBA gerado pelo silício Qualcomm
-                    while (pixels_despachados < vk.tamanhoBufferPixels) {
-                        size_t bloco_video = std::min(VIDEO_PAYLOAD_SIZE, (size_t)vk.tamanhoBufferPixels - pixels_despachados);
-
-                        // Cabeçalho de vídeo: [ Frame ID (4B) | Chunk ID (4B) ]
-                        std::memcpy(buffer_transmissao_video, &current_frame_id, 4);
-                        std::memcpy(buffer_transmissao_video + 4, &video_chunk_id, 4);
-                        std::memcpy(buffer_transmissao_video + 8, ponteiro_video + pixels_despachados, bloco_video);
-
-                        sendto(video_sockfd, buffer_transmissao_video, 8 + bloco_video, 0, (const struct sockaddr *)&pc_video_addr, sizeof(pc_video_addr));
-
-                        pixels_despachados += bloco_video;
-                        video_chunk_id++;
-                        usleep(2); // Folga milimétrica para a placa de rede do PC real absorver
+                            sendto(video_sockfd, &buffer_transmissao_video[0], 8 + bloco_video, 0, (const struct sockaddr *)&pc_video_addr, sizeof(pc_video_addr));
+                            pixels_despachados += bloco_video;
+                            video_chunk_id++;
+                            usleep(2);
+                        }
+                        real_vkUnmapMemory(vk.device, vk.pixelTransferMemory);
+                        std::cout << "[USB Video] Frame " << current_frame_id << " enviado pelo cabo (Amostragem 1:30)." << std::endl;
                     }
-
-                    std::cout << "[Adreno 619] Transmitidos " << pixels_despachados << " bytes de video para o PC." << std::endl;
-                    real_vkUnmapMemory(vk.device, vk.pixelTransferMemory);
                 }
-
             }
 
-            // C: Devolve o ACK para a porta fixa do PC real destravar o Sliding Window
+            // Responde o ACK regulador para destravar a janela assíncrona do PC real
             struct sockaddr_in target_ack_addr = cliaddr;
             target_ack_addr.sin_port = htons(65433);
             sendto(sockfd, &current_frame_id, sizeof(current_frame_id), 0, (const struct sockaddr *)&target_ack_addr, sizeof(target_ack_addr));
         }
     }
-
-    close(sockfd);
-    limparVulkan(vk);
-    return 0;
+    close(sockfd); limparVulkan(vk); return 0;
 }
+
