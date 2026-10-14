@@ -92,6 +92,9 @@ static PFN_vkCmdCopyImageToBuffer real_vkCmdCopyImageToBuffer = nullptr;
 
 void* vulkan_lib = nullptr;
 
+static int video_sockfd = -1;
+static struct sockaddr_in pc_video_addr;
+
 bool carregarFuncoesVulkan() {
     vulkan_lib = dlopen("/system/lib64/libvulkan.so", RTLD_NOW);
     if (!vulkan_lib) return false;
@@ -489,6 +492,11 @@ int main() {
         return -1;
     }
 
+    video_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    std::memset(&pc_video_addr, 0, sizeof(pc_video_addr));
+    pc_video_addr.sin_family = AF_INET;
+    pc_video_addr.sin_port = htons(65434); // Porta exclusiva para recepcao de video no PC
+
     std::cout << "[*] Canal UDP pronto para receber VBOs na porta " << PORT << "..." << std::endl;
 
     std::vector<char> socket_read_buffer(MAX_BUFFER_SIZE);
@@ -594,16 +602,42 @@ int main() {
                 real_vkQueueWaitIdle(vk.queue);
                 std::cout << "[Adreno 619] Quadro " << current_frame_id << " rasterizado e copiado para o Buffer de Readback!" << std::endl;
 
-                // 6. SANITY CHECK: Valida a assinatura de cores na memória mapeada
+                // 6. SANITY CHECK + STREAMING DE VÍDEO REAL DE VOLTA PARA O PC
                 void* ptrPixelsLocais = nullptr;
                 if (real_vkMapMemory(vk.device, vk.pixelTransferMemory, 0, vk.tamanhoBufferPixels, 0, &ptrPixelsLocais) == VK_SUCCESS && ptrPixelsLocais) {
                     unsigned char* bytes_rgba = (unsigned char*)ptrPixelsLocais;
-                    std::cout << "[Readback Check] Pixel 0 RGBA: ("
-                              << (int)bytes_rgba[0] << ", " << (int)bytes_rgba[1] << ", "
-                              << (int)bytes_rgba[2] << ", " << (int)bytes_rgba[3] << ")" << std::endl;
+                    
+                    // Alinha o IP do PC dinamicamente baseado em quem enviou a geometria
+                    pc_video_addr.sin_addr = cliaddr.sin_addr;
 
+                    const size_t VIDEO_PAYLOAD_SIZE = 1400;
+                    size_t pixels_despachados = 0;
+                    uint32_t video_chunk_id = 0;
+                    char* ponteiro_video = (char*)ptrPixelsLocais;
+
+                    // Buffer de transporte local de 1408 bytes (Evita allocs na heap)
+                    static char buffer_transmissao_video[1408];
+
+                    // Dispara as fatias do frame RGBA gerado pelo silício Qualcomm
+                    while (pixels_despachados < vk.tamanhoBufferPixels) {
+                        size_t bloco_video = std::min(VIDEO_PAYLOAD_SIZE, (size_t)vk.tamanhoBufferPixels - pixels_despachados);
+
+                        // Cabeçalho de vídeo: [ Frame ID (4B) | Chunk ID (4B) ]
+                        std::memcpy(buffer_transmissao_video, &current_frame_id, 4);
+                        std::memcpy(buffer_transmissao_video + 4, &video_chunk_id, 4);
+                        std::memcpy(buffer_transmissao_video + 8, ponteiro_video + pixels_despachados, bloco_video);
+
+                        sendto(video_sockfd, buffer_transmissao_video, 8 + bloco_video, 0, (const struct sockaddr *)&pc_video_addr, sizeof(pc_video_addr));
+
+                        pixels_despachados += bloco_video;
+                        video_chunk_id++;
+                        usleep(2); // Folga milimétrica para a placa de rede do PC real absorver
+                    }
+
+                    std::cout << "[Adreno 619] Transmitidos " << pixels_despachados << " bytes de video para o PC." << std::endl;
                     real_vkUnmapMemory(vk.device, vk.pixelTransferMemory);
                 }
+
             }
 
             // C: Devolve o ACK para a porta fixa do PC real destravar o Sliding Window

@@ -12,6 +12,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <fstream>
 
 static PFN_vkGetInstanceProcAddr nextGIPA = nullptr;
 static PFN_vkGetDeviceProcAddr   nextGDPA = nullptr;
@@ -47,6 +48,54 @@ void inicializarRedeProxy();
 static std::atomic<uint32_t> frame_enviado_id(0);
 static std::atomic<uint32_t> frame_confirmado_id(0);
 static const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+
+// --- NOVO RECEPTOR DE VÍDEO DA GPU EXTERNA ---
+static char buffer_video_recebido[480 * 360 * 4]; // 691.200 bytes pré-alocados
+static int video_receive_sockfd = -1;
+
+// Variáveis de controle de dumping de imagem
+static std::atomic<bool> dump_concluido(false);
+
+void threadRecepcaoVideo() {
+    video_receive_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    int opt_reuse = 1;
+    setsockopt(video_receive_sockfd, SOL_SOCKET, SO_REUSEADDR, &opt_reuse, sizeof(opt_reuse));
+
+    struct sockaddr_in local_video_addr;
+    std::memset(&local_video_addr, 0, sizeof(local_video_addr));
+    local_video_addr.sin_family = AF_INET;
+    local_video_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    local_video_addr.sin_port = htons(65434); // PORTA EXCLUSIVA DE VÍDEO CASADA COM O CELULAR
+
+    if (bind(video_receive_sockfd, (struct sockaddr*)&local_video_addr, sizeof(local_video_addr)) < 0) {
+        std::fprintf(stderr, "[USB_SMARTPHONE_PROXY] Erro ao fixar porta de video 65434.\n");
+        return;
+    }
+
+    std::vector<char> socket_video_buffer(1500);
+    struct sockaddr_in de_addr;
+    socklen_t de_len = sizeof(de_addr);
+
+    // Loop bloqueante de alta velocidade rodando em background no PC real
+    while (rede_inicializada) {
+        ssize_t n = recvfrom(video_receive_sockfd, socket_video_buffer.data(), socket_video_buffer.size(), 0, (struct sockaddr *)&de_addr, &de_len);
+        if (n >= 8) {
+            uint32_t frame_id = 0;
+            uint32_t chunk_id = 0;
+            std::memcpy(&frame_id, socket_video_buffer.data(), 4);
+            std::memcpy(&chunk_id, socket_video_buffer.data() + 4, 4);
+
+            size_t payload_size = n - 8;
+            size_t offset_destino = chunk_id * 1400;
+
+            // Remonta o pixel bruto vindo da Adreno 619 na RAM do PC real de forma assíncrona
+            if (offset_destino + payload_size <= (480 * 360 * 4)) {
+                std::memcpy(buffer_video_recebido + offset_destino, socket_video_buffer.data() + 8, payload_size);
+            }
+        }
+    }
+    close(video_receive_sockfd);
+}
 
 void threadEscutaACK() {
     int udp_receive_fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -84,8 +133,11 @@ void threadEscutaACK() {
 
 void inicializarRedeProxyComThread() {
     if (rede_inicializada) return;
-    inicializarRedeProxy();
+    inicializarRedeProxy(); // Inicializa os sockets base
+    
+    // Dispara as duas esteiras de produção paralelas em background na CPU do PC
     std::thread(threadEscutaACK).detach();
+    std::thread(threadRecepcaoVideo).detach(); // <-- Injetado aqui!
 }
 
 // --- INICIALIZADOR DE REDE PURIFICADO DO PC ---
@@ -191,8 +243,6 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
         usleep(500); 
     }
 
-    // CONDICIONAL PURIFICADA: Se o cache na RAM do PC contém os 262KB do cubo, 
-    // bombardeia o cabo USB de forma incondicional frame por frame!
     if (rede_inicializada && !cache_geometria_local.empty()) {
         const size_t MAX_PAYLOAD_SIZE = 1400; 
         size_t bytes_despachados = 0;
@@ -218,6 +268,29 @@ static VKAPI_ATTR VkResult VKAPI_CALL MyHook_vkQueuePresentKHR(
         }
         frame_enviado_id.fetch_add(1);
         global_frame_id++;
+
+        // --- GATILHO EXTRAORDINÁRIO: CAPTURA E DUMP DE VÍDEO DO SMARTPHONE ---
+        // Quando a Adreno processar e remontar os primeiros frames, interceptamos a RAM do PC
+        // e gravamos um instantâneo físico contendo os pixels brutos da Qualcomm!
+        if (global_frame_id > 30 && !dump_concluido.load()) {
+            dump_concluido.store(true);
+            std::fprintf(stderr, "[FOTO-CAPTURA] Remontando buffer RGBA da Adreno 619 em disco...\n");
+            
+            std::ofstream ppm_file("frame_adreno_619.ppm", std::ios::out | std::ios::binary);
+            if (ppm_file.is_open()) {
+                // Cabeçalho mestre PPM P6 (Formato bruto legível pelo Linux Mint)
+                ppm_file << "P6\n" << 480 << " " << 360 << "\n255\n";
+                
+                // Converte RGBA opaco de 4 canais para RGB puro de 3 canais exigido pela especificação PPM
+                for (size_t i = 0; i < (480 * 360 * 4); i += 4) {
+                    ppm_file.put(buffer_video_recebido[i]);     // R
+                    ppm_file.put(buffer_video_recebido[i + 1]); // G
+                    ppm_file.put(buffer_video_recebido[i + 2]); // B
+                }
+                ppm_file.close();
+                std::fprintf(stderr, "\n[SUCESSO] IMAGEM SALVA COM SUCESSO: 'frame_adreno_619.ppm' gerado na pasta do PC!\n\n");
+            }
+        }
     }
 
     if (nextQueuePresentKHR) {
