@@ -25,6 +25,8 @@ static PFN_vkQueuePresentKHR nextQueuePresentKHR = nullptr;
 static PFN_vkCreateShaderModule nextCreateShaderModule = nullptr;
 static PFN_vkDestroyShaderModule nextDestroyShaderModule = nullptr;
 
+static PFN_vkCmdPushConstants nextCmdPushConstants = nullptr;
+
 static VkInstance currentInstance = VK_NULL_HANDLE;
 static VkDevice   currentDevice = VK_NULL_HANDLE;
 
@@ -367,6 +369,38 @@ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInst
     return nullptr;
 }
 
+extern "C" VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(
+    VkCommandBuffer commandBuffer,
+    VkPipelineLayout layout,
+    VkShaderStageFlags stageFlags,
+    uint32_t offset,
+    uint32_t size,
+    const void* pValues)
+{
+    if (nextCmdPushConstants == nullptr) {
+        nextCmdPushConstants = reinterpret_cast<PFN_vkCmdPushConstants>(nextGDPA(currentDevice, "vkCmdPushConstants"));
+    }
+
+    // Envia usando a mesma assinatura estruturada de 12 bytes da geometria
+    if (rede_inicializada && size > 0) {
+        uint32_t tamanho_total = 0xFFFFFFFF; // Tag mágica para o celular saber que é um Push Constant
+        uint32_t current_frame = frame_enviado_id.load();
+        uint32_t tamanho_dados = size;
+
+        std::vector<char> pacote_push(12 + size);
+        std::memcpy(pacote_push.data(), &tamanho_total, 4);      // Bytes 0-3
+        std::memcpy(pacote_push.data() + 4, &current_frame, 4);   // Bytes 4-7
+        std::memcpy(pacote_push.data() + 8, &tamanho_dados, 4);   // Bytes 8-11 (Chunk ID vira tamanho real)
+        std::memcpy(pacote_push.data() + 12, pValues, size);
+
+        sendto(sockfd, pacote_push.data(), pacote_push.size(), 0, (const struct sockaddr *)&servaddr, sizeof(servaddr));
+    }
+
+    if (nextCmdPushConstants) {
+        nextCmdPushConstants(commandBuffer, layout, stageFlags, offset, size, pValues);
+    }
+}
+
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     if (!pName) return nullptr;
     if (std::strcmp(pName, "vkGetDeviceProcAddr") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceProcAddr);
@@ -376,6 +410,7 @@ extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice
     if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(MyHook_vkCmdDraw);
     if (std::strcmp(pName, "vkQueuePresentKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(MyHook_vkQueuePresentKHR);
     if (std::strcmp(pName, "vkCreateShaderModule") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkCreateShaderModule);
+    if (std::strcmp(pName, "vkCmdPushConstants") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkCmdPushConstants);
     if (nextGDPA) return nextGDPA(device, pName);
     return nullptr;
 }

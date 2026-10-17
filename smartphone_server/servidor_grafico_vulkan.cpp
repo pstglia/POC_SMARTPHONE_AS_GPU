@@ -62,6 +62,8 @@ typedef void (*PFN_vkDestroyPipeline)(VkDevice, VkPipeline, const VkAllocationCa
 typedef void (*PFN_vkCmdBindPipeline)(VkCommandBuffer, VkPipelineBindPoint, VkPipeline);
 typedef void (*PFN_vkCmdBindVertexBuffers)(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize*);
 
+typedef void (*PFN_vkCmdPushConstants)(VkCommandBuffer, VkPipelineLayout, VkShaderStageFlags, uint32_t, uint32_t, const void*);
+
 static PFN_vkCreateInstance real_vkCreateInstance = nullptr;
 static PFN_vkEnumeratePhysicalDevices real_vkEnumeratePhysicalDevices = nullptr;
 static PFN_vkGetPhysicalDeviceProperties real_vkGetPhysicalDeviceProperties = nullptr;
@@ -106,6 +108,12 @@ static PFN_vkDestroyPipeline real_vkDestroyPipeline = nullptr;
 
 static PFN_vkCmdBindPipeline real_vkCmdBindPipeline = nullptr;
 static PFN_vkCmdBindVertexBuffers real_vkCmdBindVertexBuffers = nullptr;
+
+static PFN_vkCmdPushConstants real_vkCmdPushConstants = nullptr;
+
+// Cache dinâmico para reter a rotação que desce do PC
+static std::vector<char> cache_push_constants(128, 0);
+static uint32_t tamanho_push_atual = 0;
 
 void* vulkan_lib = nullptr;
 
@@ -164,6 +172,8 @@ bool carregarFuncoesVulkan() {
     real_vkDestroyPipeline = (PFN_vkDestroyPipeline)dlsym(vulkan_lib, "vkDestroyPipeline");
     real_vkCmdBindPipeline = (PFN_vkCmdBindPipeline)dlsym(vulkan_lib, "vkCmdBindPipeline");
     real_vkCmdBindVertexBuffers = (PFN_vkCmdBindVertexBuffers)dlsym(vulkan_lib, "vkCmdBindVertexBuffers");
+
+    real_vkCmdPushConstants = (PFN_vkCmdPushConstants)dlsym(vulkan_lib, "vkCmdPushConstants");
 
     return true;
 }
@@ -503,9 +513,9 @@ bool inicializarPipelineGraficoHeadless(ContextoVulkanHeadless& vk) {
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.cullMode = VK_CULL_MODE_NONE; // <-- Desativa o descarte de faces (Garante pintura total!)
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
 
     VkPipelineMultisampleStateCreateInfo multisampling{};
     multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -521,10 +531,20 @@ bool inicializarPipelineGraficoHeadless(ContextoVulkanHeadless& vk) {
     colorBlending.attachmentCount = 1;
     colorBlending.pAttachments = &colorBlendAttachment;
 
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = 64; // Janela exata de 64 bytes para a matriz MVP de rotacao do cubo
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange; // Força a Adreno a mapear o barramento de rotação
 
-    if (real_vkCreatePipelineLayout(vk.device, &pipelineLayoutInfo, nullptr, &vk.pipelineLayout) != VK_SUCCESS) return false;
+    if (real_vkCreatePipelineLayout(vk.device, &pipelineLayoutInfo, nullptr, &vk.pipelineLayout) != VK_SUCCESS) {
+        std::cerr << "[-] Falha ao alocar VkPipelineLayout na Adreno." << std::endl;
+        return false;
+    }
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -659,7 +679,6 @@ int main() {
     std::vector<char> socket_read_buffer(MAX_BUFFER_SIZE);
     std::vector<char> frame_geometry_accumulator;
     socklen_t len = sizeof(cliaddr);
-
     uint32_t total_frames_recebidos = 0;
 
     while (true) {
@@ -669,8 +688,21 @@ int main() {
         while (true) {
             ssize_t n = recvfrom(sockfd, socket_read_buffer.data(), MAX_BUFFER_SIZE, 0, (struct sockaddr *)&cliaddr, &len);
             if (n <= 0) continue;
+
             if (n >= 12) {
                 std::memcpy(&tamanho_esperado, socket_read_buffer.data(), 4);
+                
+                // SE FOR A TAG MÁGICA DE PUSH CONSTANTS, ENTRA NO CONSUMIDOR CONTIDO
+                if (tamanho_esperado == 0xFFFFFFFF) {
+                    uint32_t tamanho_dados = 0;
+                    std::memcpy(&tamanho_dados, socket_read_buffer.data() + 8, 4);
+                    if (tamanho_dados <= cache_push_constants.size() && (size_t)n >= (12 + tamanho_dados)) {
+                        std::memcpy(cache_push_constants.data(), socket_read_buffer.data() + 12, tamanho_dados);
+                        tamanho_push_atual = tamanho_dados;
+                    }
+                    continue; // Volta a ouvir mantendo o estado do acumulador intacto
+                }
+
                 std::memcpy(&current_frame_id, socket_read_buffer.data() + 4, 4);
                 uint32_t chunk_id; std::memcpy(&chunk_id, socket_read_buffer.data() + 8, 4);
                 size_t tamanho_payload = n - 12;
@@ -678,6 +710,7 @@ int main() {
                 bytes_recebidos_vbo += tamanho_payload;
                 if (bytes_recebidos_vbo >= tamanho_esperado) { frame_concluido = true; break; }
             }
+
         }
 
         if (frame_concluido && bytes_recebidos_vbo == tamanho_esperado) {
@@ -706,55 +739,23 @@ int main() {
                 renderPassInfo.clearValueCount = 1;
                 renderPassInfo.pClearValues = &clearColor;
 
-                // A: Renderiza e limpa a tela virtual com o verde
                 real_vkCmdBeginRenderPass(vk.commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
                 if (vk.vertexBuffer != VK_NULL_HANDLE && vk.graphicsPipeline != VK_NULL_HANDLE) {
                     real_vkCmdBindPipeline(vk.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.graphicsPipeline);
+                    
+                    if (tamanho_push_atual > 0 && real_vkCmdPushConstants) {
+                        real_vkCmdPushConstants(vk.commandBuffer, vk.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, tamanho_push_atual, cache_push_constants.data());
+                    }
+
                     VkDeviceSize offsets[] = {0};
                     real_vkCmdBindVertexBuffers(vk.commandBuffer, 0, 1, &vk.vertexBuffer, offsets);
                     
                     static PFN_vkCmdDraw real_vkCmdDraw = (PFN_vkCmdDraw)dlsym(vulkan_lib, "vkCmdDraw");
-                    if (real_vkCmdDraw) {
-                        real_vkCmdDraw(vk.commandBuffer, 36, 1, 0, 0);
-                    }
+                    if (real_vkCmdDraw) real_vkCmdDraw(vk.commandBuffer, 36, 1, 0, 0);
                 }
+
                 real_vkCmdEndRenderPass(vk.commandBuffer);
-
-                // ==================================================================
-                // B: BARREIRA GRÁFICA DE TRANSIÇÃO DE LAYOUT DA IMAGEM
-                // ==================================================================
-                typedef void (*PFN_vkCmdPipelineBarrier)(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*, uint32_t, const VkImageMemoryBarrier*);
-                static PFN_vkCmdPipelineBarrier real_vkCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)dlsym(vulkan_lib, "vkCmdPipelineBarrier");
-
-                VkImageMemoryBarrier imageBarrier{};
-                imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                imageBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; 
-                imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;     
-                imageBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-                imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                imageBarrier.image = vk.headlessImage;
-                imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                imageBarrier.subresourceRange.baseMipLevel = 0;
-                imageBarrier.subresourceRange.levelCount = 1;
-                imageBarrier.subresourceRange.baseArrayLayer = 0;
-                imageBarrier.subresourceRange.layerCount = 1;
-
-                if (real_vkCmdPipelineBarrier) {
-                    real_vkCmdPipelineBarrier(
-                        vk.commandBuffer,
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        0, 0, nullptr, 0, nullptr, 1, &imageBarrier
-                    );
-                }
-
-                // C: CÓPIA INTERNA DA TEXTURA PARA O BUFFER
-                VkBufferImageCopy region{};
-                region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                region.imageSubresource.layerCount = 1;
-                region.imageExtent = {RES_WIDTH, RES_HEIGHT, 1};
-
-                real_vkCmdCopyImageToBuffer(vk.commandBuffer, vk.headlessImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.pixelTransferBuffer, 1, &region);
                 real_vkEndCommandBuffer(vk.commandBuffer);
 
                 VkSubmitInfo submitInfo{};
@@ -765,7 +766,6 @@ int main() {
                 real_vkQueueSubmit(vk.queue, 1, &submitInfo, VK_NULL_HANDLE);
                 real_vkQueueWaitIdle(vk.queue);
 
-                // --- D: TRANSMISSÃO DE VÍDEO NO CABO (Amostragem 1:30) ---
                 if (total_frames_recebidos % 30 == 0) {
                     void* ptrPixelsLocais = nullptr;
                     if (real_vkMapMemory(vk.device, vk.pixelTransferMemory, 0, vk.tamanhoBufferPixels, 0, &ptrPixelsLocais) == VK_SUCCESS && ptrPixelsLocais) {
@@ -799,4 +799,5 @@ int main() {
     }
     close(sockfd); limparVulkan(vk); return 0;
 }
+
 
